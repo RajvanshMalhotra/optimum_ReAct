@@ -182,4 +182,4 @@ class MemoryStore:
         return {
             "total_memories": memory_count,
             "total_sessions": session_count
-        }
+        }# implement initial memory store interface (2025-11-10)
