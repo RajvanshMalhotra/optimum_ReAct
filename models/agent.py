@@ -19,4 +19,4 @@ class AgentThought(BaseModel):
     query: str = ""
     observation: Optional[str] = None
     complete: bool = False
-    memory_id: Optional[str] = None
+    memory_id: Optional[str] = None# scaffold agent class with core attributes (2025-11-11)
