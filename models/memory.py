@@ -16,4 +16,4 @@ class MemoryNode(BaseModel):
     access_count: int = 0
     
     class Config:
-        arbitrary_types_allowed = True
+        arbitrary_types_allowed = True# define base memory abstraction (2025-11-12)
