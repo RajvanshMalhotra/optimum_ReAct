@@ -95,4 +95,4 @@ class HybridMemory:
         stats = self.store.get_stats()
         return (f"Memory: {self.graph.size()} in RAM, "
                 f"{stats['total_memories']} in DB | "
-                f"Session: {self.session_id}")
+                f"Session: {self.session_id}")# introduce hybrid memory placeholder (2025-11-13)
