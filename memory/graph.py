@@ -80,3 +80,4 @@ class MemoryGraph:
     def size(self) -> int:
         """Get current graph size."""
         return len(self.nodes)# add basic graph memory structure (2025-11-09)
+# add node linking logic (2025-11-14)
