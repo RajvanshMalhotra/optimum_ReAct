@@ -20,3 +20,4 @@ class AgentThought(BaseModel):
     observation: Optional[str] = None
     complete: bool = False
     memory_id: Optional[str] = None# scaffold agent class with core attributes (2025-11-11)
+# wire agent with memory dependency (2025-11-15)
