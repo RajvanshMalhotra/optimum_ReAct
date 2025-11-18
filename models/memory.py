@@ -17,3 +17,4 @@ class MemoryNode(BaseModel):
     
     class Config:
         arbitrary_types_allowed = True# define base memory abstraction (2025-11-12)
+# add read/write memory contracts (2025-11-18)
