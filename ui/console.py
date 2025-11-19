@@ -22,3 +22,15 @@ def print_result(text: str, theme: str = "hacker"):
         "fire": ("🔥 OUTPUT 🔥", "red"),
         "minimal": ("RESULT", "white"),
     }
+    title, color = THEMES.get(theme, THEMES["minimal"])
+    panel = Panel(Text(text, style=color), title=title, border_style=color)
+    console.print(panel)
+
+
+def print_success(message: str):
+    """Print success message."""
+    console.print(f"[green]✓ {message}[/green]")
+
+
+def print_warning(message: str):
+    """Print warning message."""
