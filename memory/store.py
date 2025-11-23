@@ -184,3 +184,4 @@ class MemoryStore:
             "total_sessions": session_count
         }# implement initial memory store interface (2025-11-10)
 # add simple in-memory backend (2025-11-17)
+# handle memory overwrite cases (2025-11-23)
