@@ -34,3 +34,14 @@ def print_success(message: str):
 
 def print_warning(message: str):
     """Print warning message."""
+    console.print(f"[yellow]⚠ {message}[/yellow]")
+
+
+def print_error(message: str):
+    """Print error message."""
+    console.print(f"[red]✗ {message}[/red]")
+
+
+def print_info(message: str):
+    """Print info message."""
+    console.print(f"[cyan]ℹ {message}[/cyan]")
