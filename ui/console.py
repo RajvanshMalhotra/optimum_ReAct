@@ -45,3 +45,14 @@ def print_error(message: str):
 def print_info(message: str):
     """Print info message."""
     console.print(f"[cyan]ℹ {message}[/cyan]")
+
+
+def print_dim(message: str):
+    """Print dimmed message."""
+    console.print(f"[dim]{message}[/dim]")
+
+
+def get_input(prompt: str, default: str = "") -> str:
+    """Get user input with prompt."""
+    value = console.input(f"[bold]{prompt}[/bold] ")
+    return value.strip() or default
