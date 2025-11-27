@@ -24,3 +24,15 @@ LLM_TIMEOUT = 60.0  # Reduced from 90.0
 # Memory Configuration - OPTIMIZED
 MEMORY_MAX_GRAPH_NODES = 50  # Reduced from 100 (faster searches)
 MEMORY_PERSIST_BATCH_SIZE = 10  # Reduced from 20 (smaller writes)
+MEMORY_SEARCH_LIMIT = 2  # Reduced from 5 (faster recalls)
+
+# Agent Configuration - OPTIMIZED
+AGENT_MAX_STEPS = 8  # Reduced from 10 (faster convergence)
+
+# Cache Configuration - NEW
+CACHE_ENABLED = True
+CACHE_MAX_SIZE = 100
+CACHE_TTL = 3600  # 1 hour
+
+# Parallel Execution - NEW
+MAX_PARALLEL_TOOLS = 3  # Max tools to run concurrently
