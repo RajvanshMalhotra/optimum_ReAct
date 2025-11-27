@@ -23,3 +23,4 @@ class AgentThought(BaseModel):
 # wire agent with memory dependency (2025-11-15)
 # add decision loop skeleton (2025-11-21)
 # refactor agent execution flow (2025-11-22)
+# add agent state tracking (2025-11-27)
