@@ -83,3 +83,4 @@ class MemoryGraph:
 # add node linking logic (2025-11-14)
 # optimize traversal logic (2025-11-20)
 # add edge weighting support (2025-11-25)
+# handle cyclic references (2025-11-30)
