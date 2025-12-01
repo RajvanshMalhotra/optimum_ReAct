@@ -19,3 +19,4 @@ class MemoryNode(BaseModel):
         arbitrary_types_allowed = True# define base memory abstraction (2025-11-12)
 # add read/write memory contracts (2025-11-18)
 # add basic validation checks (2025-11-24)
+# document memory lifecycle (2025-12-01)
