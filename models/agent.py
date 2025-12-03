@@ -25,3 +25,4 @@ class AgentThought(BaseModel):
 # refactor agent execution flow (2025-11-22)
 # add agent state tracking (2025-11-27)
 # minor cleanup and docstrings (2025-11-28)
+# add TODOs for planning module (2025-12-03)
