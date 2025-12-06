@@ -20,3 +20,4 @@ class MemoryNode(BaseModel):
 # add read/write memory contracts (2025-11-18)
 # add basic validation checks (2025-11-24)
 # document memory lifecycle (2025-12-01)
+# tighten memory interface (2025-12-06)
