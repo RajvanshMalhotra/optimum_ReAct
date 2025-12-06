@@ -36,3 +36,15 @@ CACHE_TTL = 3600  # 1 hour
 
 # Parallel Execution - NEW
 MAX_PARALLEL_TOOLS = 3  # Max tools to run concurrently
+
+# Paths
+BASE_DIR = Path(__file__).parent.parent
+DATA_DIR = BASE_DIR / "data"
+DATA_DIR.mkdir(exist_ok=True)
+
+MEMORY_DB_PATH = DATA_DIR / "agent_memory.db"
+LOG_FILE_PATH = DATA_DIR / "agent_logs.jsonl"
+
+# Validate required keys
+if not GROQ_API_KEY:
+    raise ValueError("GROQ_API_KEY not found in environment")
