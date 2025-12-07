@@ -26,3 +26,4 @@ class AgentThought(BaseModel):
 # add agent state tracking (2025-11-27)
 # minor cleanup and docstrings (2025-11-28)
 # add TODOs for planning module (2025-12-03)
+# add logging hooks (2025-12-07)
