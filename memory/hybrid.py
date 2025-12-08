@@ -99,3 +99,4 @@ class HybridMemory:
 # combine graph and store strategies (2025-11-19)
 # prioritize recent memories (2025-11-26)
 # improve fallback strategy (2025-12-02)
+# tune memory merge logic (2025-12-08)
