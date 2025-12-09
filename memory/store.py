@@ -187,3 +187,4 @@ class MemoryStore:
 # handle memory overwrite cases (2025-11-23)
 # add persistence hooks (stub) (2025-11-29)
 # refactor storage API naming (2025-12-04)
+# add lightweight caching (2025-12-09)
