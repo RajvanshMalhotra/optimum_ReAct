@@ -27,3 +27,4 @@ class AgentThought(BaseModel):
 # minor cleanup and docstrings (2025-11-28)
 # add TODOs for planning module (2025-12-03)
 # add logging hooks (2025-12-07)
+# finalize agent init flow (2025-12-10)
