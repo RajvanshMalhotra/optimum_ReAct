@@ -85,3 +85,4 @@ class MemoryGraph:
 # add edge weighting support (2025-11-25)
 # handle cyclic references (2025-11-30)
 # simplify node lookup (2025-12-05)
+# add comments for future optimizations (2025-12-11)
