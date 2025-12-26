@@ -1,3 +1,19 @@
-.env.DS_Store
-backdated_commits.sh
-backdated_commits.sh
+# Mac
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Env
+.env
+
+# Databases
+*.db
+
+# Streamlit
+.streamlit/
+
+# Cache
+.cache/
