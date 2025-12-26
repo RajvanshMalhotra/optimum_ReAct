@@ -1,0 +1,15 @@
+streamlit
+pandas
+numpy
+plotly
+requests
+
+# Search / tools
+tavily-python
+
+# Env handling (still needed even if .env is not committed)
+python-dotenv
+
+# Async support
+asyncio
+aiohttp
