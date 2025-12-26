@@ -5,7 +5,7 @@
 
 ### Installation
 ```bash
-pip install httpx pydantic rich tavily-python python-dotenv
+pip -r install requirements.txt
 ```
 
 ### Setup Environment
