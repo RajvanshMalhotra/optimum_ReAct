@@ -3,6 +3,7 @@ pandas
 numpy
 plotly
 requests
+pydantic
 
 # Search / tools
 tavily-python
