@@ -1,4 +1,433 @@
-"""Optimized autonomous agent with parallel execution and smart caching."""
+# """Optimized autonomous agent with parallel execution and smart caching."""
+# import time
+# import json
+# import re
+# import asyncio
+# from typing import List, Optional
+# from models.agent import AgentThought, ToolResult
+# from memory.hybrid import HybridMemory
+# from core.llm import llm_client
+# from tools.registry import tool_registry
+# from config import AGENT_MAX_STEPS
+
+
+# class FastAgent:
+#     """Optimized autonomous agent."""
+    
+#     def __init__(self, memory: HybridMemory):
+#         self.memory = memory
+#         self.llm = llm_client
+#         self._memory_cache = None  # Cache memory context
+#         self._last_recall_task = None
+        
+#     async def _get_user_input(self, question: str) -> str:
+#         """Get input from user."""
+#         try:
+#             return input(f"\033[93m{question}\033[0m ")
+#         except (EOFError, KeyboardInterrupt):
+#             return "not specified"
+    
+#     async def _execute_tools_parallel(self, tools_and_queries: List[tuple]) -> List[ToolResult]:
+#         """Execute multiple tools in parallel."""
+#         tasks = [self._execute_tool(tool, query) for tool, query in tools_and_queries]
+#         return await asyncio.gather(*tasks)
+    
+#     async def _execute_tool(self, tool_name: str, query: str) -> ToolResult:
+#         """Execute a tool."""
+#         print(f"\033[94m🔧 {tool_name}\033[0m")
+        
+#         try:
+#             if tool_name == "ask_user":
+#                 answer = await self._get_user_input(query)
+#                 self.memory.remember(
+#                     f"Q: {query} | A: {answer}",
+#                     mem_type="preference",
+#                     importance=0.9
+#                 )
+#                 return ToolResult(tool=tool_name, success=True, data=answer)
+            
+#             elif tool_name == "remember":
+#                 mem_id = self.memory.remember(query, mem_type="fact", importance=0.8)
+#                 return ToolResult(tool=tool_name, success=True, data=f"Stored")
+            
+#             elif tool_name == "recall":
+#                 memories = self.memory.recall(query, limit=2)  # Reduced from 3
+#                 result = "\n".join([f"- {m.content[:100]}" for m in memories])  # Truncate
+#                 return ToolResult(tool=tool_name, success=True, data=result or "None")
+            
+#             elif tool_registry.has_tool(tool_name):
+#                 tool = tool_registry.get_tool(tool_name)
+#                 result = await tool.execute(query)
+                
+#                 if result.success and tool_name == "web_search":
+#                     # Store truncated version
+#                     self.memory.remember(
+#                         f"Search: {query[:50]} → {str(result.data)[:150]}",
+#                         mem_type="fact",
+#                         importance=0.7
+#                     )
+                
+#                 return result
+            
+#             else:
+#                 return ToolResult(tool=tool_name, success=False, error="Tool unavailable")
+                
+#         except Exception as e:
+#             return ToolResult(tool=tool_name, success=False, error=str(e))
+    
+#     def _get_memory_context(self, task: str, force_refresh: bool = False) -> str:
+#         """Get memory context with caching."""
+#         # Cache memory context for same task
+#         if not force_refresh and self._last_recall_task == task and self._memory_cache:
+#             return self._memory_cache
+        
+#         memories = self.memory.recall(task, limit=2)  # Reduced from 3
+#         context = "\n".join([f"- {m.content[:100]}" for m in memories]) if memories else "None"
+        
+#         self._memory_cache = context
+#         self._last_recall_task = task
+#         return context
+    
+#     def _parse_json_fast(self, response: str) -> Optional[dict]:
+#         """Fast JSON parsing with fallbacks."""
+#         # Try direct parse first (fastest)
+#         try:
+#             return json.loads(response)
+#         except:
+#             pass
+        
+#         # Try regex extraction
+#         try:
+#             match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', response, re.DOTALL)
+#             if match:
+#                 return json.loads(match.group(0))
+#         except:
+#             pass
+        
+#         return None
+    
+#     async def _think_fast(self, task: str, previous_thoughts: List[AgentThought]) -> AgentThought:
+#         """Optimized thinking with shorter prompts."""
+        
+#         # Get cached memory context
+#         memory_context = self._get_memory_context(task)
+        
+#         # Condensed thought context (only last 2 steps)
+#         recent_thoughts = previous_thoughts[-2:] if len(previous_thoughts) > 2 else previous_thoughts
+#         thought_context = "\n".join([
+#             f"{t.step}. {t.action}: {t.observation[:80] if t.observation else 'N/A'}"
+#             for t in recent_thoughts
+#         ])
+        
+#         # Get tool descriptions (cached at registry level)
+#         tools = ["web_search", "ask_user", "remember", "recall"]
+#         tools_desc = "web_search (current data), ask_user (questions), remember (store), recall (retrieve)"
+        
+#         # Shorter, more focused prompt
+#         prompt = f"""Task: {task}
+# Memory: {memory_context[:200]}
+# Steps: {thought_context if thought_context else 'First step'}
+
+# JSON (no markdown):
+# {{"reasoning": "brief thought", "action": "web_search|ask_user|remember|recall|final_answer", "query": "specific query", "complete": true/false}}"""
+
+#         response = await self.llm.simple_prompt(prompt, max_tokens=400)  # Reduced from 800
+        
+#         # Fast JSON parse
+#         data = self._parse_json_fast(response)
+        
+#         if data:
+#             thought = AgentThought(
+#                 step=len(previous_thoughts) + 1,
+#                 reasoning=data.get("reasoning", "")[:150],  # Truncate
+#                 action=data.get("action", "final_answer"),
+#                 query=data.get("query", ""),
+#                 complete=data.get("complete", False)
+#             )
+            
+#             # Store thought (async, non-blocking would be better but keeping simple)
+#             thought.memory_id = self.memory.remember(
+#                 f"S{thought.step}: {thought.reasoning[:80]}",
+#                 mem_type="thought",
+#                 importance=0.5  # Lower importance for thoughts
+#             )
+            
+#             return thought
+        
+#         # Fallback
+#         return AgentThought(
+#             step=len(previous_thoughts) + 1,
+#             reasoning="Parsing failed",
+#             action="final_answer",
+#             complete=True
+#         )
+    
+#     async def run(self, task: str, max_steps: int = AGENT_MAX_STEPS) -> str:
+#         """Run agent with optimizations."""
+#         print(f"\033[96m🤖 FastAgent running...\033[0m\n")
+        
+#         thoughts: List[AgentThought] = []
+#         start_time = time.time()
+        
+#         # Check if we've done this before (memory)
+#         similar_results = self.memory.recall(f"Task '{task[:50]}'", limit=1)
+#         if similar_results and "completed" in similar_results[0].content.lower():
+#             print(f"\033[93m💡 Found similar past task!\033[0m")
+        
+#         for step in range(max_steps):
+#             print(f"\033[96m💭 Step {step + 1}\033[0m")
+            
+#             # Parallel: Think while previous tool might be executing
+#             thought = await self._think_fast(task, thoughts)
+            
+#             print(f"\033[2m{thought.reasoning[:100]}\033[0m")
+#             print(f"\033[92m→ {thought.action}\033[0m\n")
+            
+#             # Execute action
+#             if thought.action == "final_answer":
+#                 # Compile final answer with minimal context
+#                 info = "\n".join([
+#                     f"{t.observation[:150]}" for t in thoughts[-3:] if t.observation
+#                 ])
+                
+#                 final_prompt = f"""Task: {task}
+# Info: {info}
+
+# Concise final answer:"""
+
+#                 final_answer = await self.llm.simple_prompt(final_prompt, max_tokens=1000)  # Reduced from 2000
+                
+#                 # Save session
+#                 duration = time.time() - start_time
+#                 self.memory.save_session(task, final_answer[:300], duration)  # Truncated
+                
+#                 return final_answer
+            
+#             else:
+#                 result = await self._execute_tool(thought.action, thought.query)
+#                 thought.observation = f"{result.data[:200]}" if result.success else f"Error: {result.error}"
+            
+#             # Link memory (only if both exist)
+#             if thought.memory_id and thoughts and thoughts[-1].memory_id:
+#                 self.memory.relate(thoughts[-1].memory_id, thought.memory_id)
+            
+#             thoughts.append(thought)
+            
+#             if thought.complete:
+#                 break
+        
+#         # Max steps - quick compilation
+#         info = " | ".join([f"{t.observation[:100]}" for t in thoughts if t.observation])
+#         final_prompt = f"Task: {task}\nInfo: {info}\n\nBrief answer:"
+        
+#         return await self.llm.simple_prompt(final_prompt, max_tokens=800)
+    
+#     async def cleanup(self):
+#         """Cleanup resources."""
+#         await self.llm.close()
+
+
+# Backward compatibility
+# AutonomousAgent = FastAgent
+
+# """Agent integration with fixed memory system - Key changes only."""
+# import time
+# from typing import List
+# from models.agent import AgentThought, ToolResult
+# from memory.hybrid import HybridMemory
+# from core.llm import llm_client
+# from tools.registry import tool_registry
+# from config import AGENT_MAX_STEPS
+
+
+# class FastAgent:
+#     """Optimized autonomous agent with proper memory utilization."""
+    
+#     def __init__(self, memory: HybridMemory):
+#         self.memory = memory
+#         self.llm = llm_client
+        
+#     async def _get_user_input(self, question: str) -> str:
+#         """Get input from user."""
+#         try:
+#             return input(f"\033[93m{question}\033[0m ")
+#         except (EOFError, KeyboardInterrupt):
+#             return "not specified"
+    
+#     async def _execute_tool(self, tool_name: str, query: str) -> ToolResult:
+#         """Execute a tool."""
+#         print(f"\033[94m🔧 {tool_name}\033[0m")
+        
+#         try:
+#             if tool_name == "ask_user":
+#                 answer = await self._get_user_input(query)
+#                 self.memory.remember(
+#                     f"Q: {query} | A: {answer}",
+#                     mem_type="preference",
+#                     importance=0.9
+#                 )
+#                 return ToolResult(tool=tool_name, success=True, data=answer)
+            
+#             elif tool_name == "remember":
+#                 mem_id = self.memory.remember(query, mem_type="fact", importance=0.8)
+#                 return ToolResult(tool=tool_name, success=True, data=f"Stored as {mem_id}")
+            
+#             elif tool_name == "recall":
+#                 # Use new recall_context method with token limit
+#                 result = self.memory.recall_context(query, max_tokens=500)
+#                 return ToolResult(tool=tool_name, success=True, data=result)
+            
+#             elif tool_registry.has_tool(tool_name):
+#                 tool = tool_registry.get_tool(tool_name)
+#                 result = await tool.execute(query)
+                
+#                 # Store search results with full content
+#                 if result.success and tool_name == "web_search":
+#                     self.memory.remember(
+#                         f"Search '{query}': {str(result.data)}",
+#                         mem_type="tool_output",
+#                         importance=0.7
+#                     )
+                
+#                 return result
+            
+#             else:
+#                 return ToolResult(tool=tool_name, success=False, error="Tool unavailable")
+                
+#         except Exception as e:
+#             return ToolResult(tool=tool_name, success=False, error=str(e))
+    
+#     async def _think_fast(self, task: str, previous_thoughts: List[AgentThought]) -> AgentThought:
+#         """Optimized thinking with memory context."""
+        
+#         # Get relevant memory context (uses graph + FTS)
+#         memory_context = self.memory.recall_context(task, max_tokens=400)
+        
+#         # Condensed thought context (only last 2 steps)
+#         recent_thoughts = previous_thoughts[-2:] if len(previous_thoughts) > 2 else previous_thoughts
+#         thought_context = "\n".join([
+#             f"{t.step}. {t.action}: {t.observation[:100] if t.observation else 'N/A'}"
+#             for t in recent_thoughts
+#         ])
+        
+#         # Shorter, more focused prompt
+#         prompt = f"""Task: {task}
+# Memory: {memory_context[:300]}
+# Steps: {thought_context if thought_context else 'First step'}
+
+# JSON (no markdown):
+# {{"reasoning": "brief thought", "action": "web_search|ask_user|remember|recall|final_answer", "query": "specific query", "complete": true/false}}"""
+
+#         response = await self.llm.simple_prompt(prompt, max_tokens=400)
+        
+#         # Parse JSON
+#         import json
+#         import re
+#         try:
+#             data = json.loads(response)
+#         except:
+#             match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', response, re.DOTALL)
+#             if match:
+#                 data = json.loads(match.group(0))
+#             else:
+#                 data = {}
+        
+#         if data:
+#             thought = AgentThought(
+#                 step=len(previous_thoughts) + 1,
+#                 reasoning=data.get("reasoning", ""),
+#                 action=data.get("action", "final_answer"),
+#                 query=data.get("query", ""),
+#                 complete=data.get("complete", False)
+#             )
+            
+#             # Store thought with full content
+#             thought.memory_id = self.memory.remember(
+#                 f"Step {thought.step}: {thought.reasoning} → {thought.action}",
+#                 mem_type="thought",
+#                 importance=0.5
+#             )
+            
+#             return thought
+        
+#         # Fallback
+#         return AgentThought(
+#             step=len(previous_thoughts) + 1,
+#             reasoning="Parsing failed",
+#             action="final_answer",
+#             complete=True
+#         )
+    
+#     async def run(self, task: str, max_steps: int = AGENT_MAX_STEPS) -> str:
+#         """Run agent with enhanced memory utilization."""
+#         print(f"\033[96m🤖 FastAgent running...\033[0m\n")
+        
+#         # Load context from similar past sessions
+#         self.memory.load_past_session_context(task)
+        
+#         thoughts: List[AgentThought] = []
+#         start_time = time.time()
+        
+#         for step in range(max_steps):
+#             print(f"\033[96m💭 Step {step + 1}\033[0m")
+            
+#             thought = await self._think_fast(task, thoughts)
+            
+#             print(f"\033[2m{thought.reasoning[:150]}\033[0m")
+#             print(f"\033[92m→ {thought.action}\033[0m\n")
+            
+#             # Execute action
+#             if thought.action == "final_answer":
+#                 # Get relevant memories for final answer
+#                 memory_context = self.memory.recall_context(task, max_tokens=800)
+                
+#                 final_prompt = f"""Task: {task}
+# Relevant Information:
+# {memory_context}
+
+# Provide a concise, comprehensive final answer:"""
+
+#                 final_answer = await self.llm.simple_prompt(final_prompt, max_tokens=1000)
+                
+#                 # Save session with full context
+#                 duration = time.time() - start_time
+#                 self.memory.save_session(task, final_answer, duration)
+                
+#                 return final_answer
+            
+#             else:
+#                 result = await self._execute_tool(thought.action, thought.query)
+#                 thought.observation = str(result.data) if result.success else f"Error: {result.error}"
+            
+#             # Create weighted connection between sequential thoughts
+#             if thought.memory_id and thoughts and thoughts[-1].memory_id:
+#                 # Higher weight for direct sequential connections
+#                 self.memory.relate(thoughts[-1].memory_id, thought.memory_id, weight=1.0)
+            
+#             thoughts.append(thought)
+            
+#             if thought.complete:
+#                 break
+        
+#         # Max steps reached - compile answer from available context
+#         memory_context = self.memory.recall_context(task, max_tokens=800)
+#         final_prompt = f"Task: {task}\nInfo: {memory_context}\n\nBrief answer based on available info:"
+        
+#         final_answer = await self.llm.simple_prompt(final_prompt, max_tokens=800)
+        
+#         duration = time.time() - start_time
+#         self.memory.save_session(task, final_answer, duration)
+        
+#         return final_answer
+    
+#     async def cleanup(self):
+#         """Cleanup resources."""
+#         await self.llm.close()
+
+
+# # Backward compatibility
+# AutonomousAgent = FastAgent
+"""Optimized autonomous agent with proper search result usage."""
 import time
 import json
 import re
@@ -12,13 +441,11 @@ from config import AGENT_MAX_STEPS
 
 
 class FastAgent:
-    """Optimized autonomous agent."""
+    """Optimized autonomous agent with fixed search synthesis."""
     
     def __init__(self, memory: HybridMemory):
         self.memory = memory
         self.llm = llm_client
-        self._memory_cache = None  # Cache memory context
-        self._last_recall_task = None
         
     async def _get_user_input(self, question: str) -> str:
         """Get input from user."""
@@ -26,11 +453,6 @@ class FastAgent:
             return input(f"\033[93m{question}\033[0m ")
         except (EOFError, KeyboardInterrupt):
             return "not specified"
-    
-    async def _execute_tools_parallel(self, tools_and_queries: List[tuple]) -> List[ToolResult]:
-        """Execute multiple tools in parallel."""
-        tasks = [self._execute_tool(tool, query) for tool, query in tools_and_queries]
-        return await asyncio.gather(*tasks)
     
     async def _execute_tool(self, tool_name: str, query: str) -> ToolResult:
         """Execute a tool."""
@@ -48,183 +470,273 @@ class FastAgent:
             
             elif tool_name == "remember":
                 mem_id = self.memory.remember(query, mem_type="fact", importance=0.8)
-                return ToolResult(tool=tool_name, success=True, data=f"Stored")
+                return ToolResult(tool=tool_name, success=True, data=f"Stored as {mem_id}")
             
             elif tool_name == "recall":
-                memories = self.memory.recall(query, limit=2)  # Reduced from 3
-                result = "\n".join([f"- {m.content[:100]}" for m in memories])  # Truncate
-                return ToolResult(tool=tool_name, success=True, data=result or "None")
+                # Use new recall_context method with token limit
+                result = self.memory.recall_context(query, max_tokens=500)
+                return ToolResult(tool=tool_name, success=True, data=result)
             
             elif tool_registry.has_tool(tool_name):
                 tool = tool_registry.get_tool(tool_name)
                 result = await tool.execute(query)
                 
+                # Store search results with FULL content and HIGH importance
                 if result.success and tool_name == "web_search":
-                    # Store truncated version
+                    search_summary = f"Search: {query}\nResults:\n{str(result.data)}"
                     self.memory.remember(
-                        f"Search: {query[:50]} → {str(result.data)[:150]}",
-                        mem_type="fact",
-                        importance=0.7
+                        search_summary,
+                        mem_type="tool_output",
+                        importance=0.95  # Very high importance for fresh searches
                     )
+                    print(f"  ✓ Stored search results ({len(str(result.data))} chars)")
                 
                 return result
             
             else:
-                return ToolResult(tool=tool_name, success=False, error="Tool unavailable")
+                return ToolResult(tool=tool_name, success=False, data=None, error="Tool unavailable")
                 
         except Exception as e:
-            return ToolResult(tool=tool_name, success=False, error=str(e))
-    
-    def _get_memory_context(self, task: str, force_refresh: bool = False) -> str:
-        """Get memory context with caching."""
-        # Cache memory context for same task
-        if not force_refresh and self._last_recall_task == task and self._memory_cache:
-            return self._memory_cache
-        
-        memories = self.memory.recall(task, limit=2)  # Reduced from 3
-        context = "\n".join([f"- {m.content[:100]}" for m in memories]) if memories else "None"
-        
-        self._memory_cache = context
-        self._last_recall_task = task
-        return context
-    
-    def _parse_json_fast(self, response: str) -> Optional[dict]:
-        """Fast JSON parsing with fallbacks."""
-        # Try direct parse first (fastest)
-        try:
-            return json.loads(response)
-        except:
-            pass
-        
-        # Try regex extraction
-        try:
-            match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', response, re.DOTALL)
-            if match:
-                return json.loads(match.group(0))
-        except:
-            pass
-        
-        return None
+            return ToolResult(tool=tool_name, success=False, data=None, error=str(e))
     
     async def _think_fast(self, task: str, previous_thoughts: List[AgentThought]) -> AgentThought:
-        """Optimized thinking with shorter prompts."""
+        """Optimized thinking with memory context."""
         
-        # Get cached memory context
-        memory_context = self._get_memory_context(task)
+        # Get relevant memory context (uses graph + FTS)
+        memory_context = self.memory.recall_context(task, max_tokens=400)
         
         # Condensed thought context (only last 2 steps)
         recent_thoughts = previous_thoughts[-2:] if len(previous_thoughts) > 2 else previous_thoughts
         thought_context = "\n".join([
-            f"{t.step}. {t.action}: {t.observation[:80] if t.observation else 'N/A'}"
+            f"{t.step}. {t.action}: {t.observation[:100] if t.observation else 'N/A'}"
             for t in recent_thoughts
         ])
         
-        # Get tool descriptions (cached at registry level)
-        tools = ["web_search", "ask_user", "remember", "recall"]
-        tools_desc = "web_search (current data), ask_user (questions), remember (store), recall (retrieve)"
+        # Count recent searches to prevent loops
+        recent_search_count = sum(1 for t in previous_thoughts[-3:] if t.action == "web_search")
         
-        # Shorter, more focused prompt
+        # Dynamic prompt that adapts based on context
+        search_guidance = ""
+        if recent_search_count >= 2:
+            search_guidance = "You've already searched multiple times. Use those results - move to final_answer."
+        elif recent_search_count == 1:
+            search_guidance = "You've searched once. Only search again if you need different/additional information."
+        
         prompt = f"""Task: {task}
-Memory: {memory_context[:200]}
-Steps: {thought_context if thought_context else 'First step'}
 
-JSON (no markdown):
-{{"reasoning": "brief thought", "action": "web_search|ask_user|remember|recall|final_answer", "query": "specific query", "complete": true/false}}"""
+Context: {memory_context[:300] if memory_context else 'Starting fresh'}
+Recent steps: {thought_context if thought_context else 'First step'}
+{search_guidance}
 
-        response = await self.llm.simple_prompt(prompt, max_tokens=400)  # Reduced from 800
+Decide the next action. Choose the most efficient path to complete the task:
+- web_search: When you need current/factual information from the internet
+- ask_user: When you need clarification or missing information from the user
+- remember: When you should store important information for later
+- recall: When you need to retrieve previously stored information
+- final_answer: When you have enough information to answer the task
+
+Respond with valid JSON only:
+{{"reasoning": "why this action", "action": "action_name", "query": "specific query if needed", "complete": true/false}}"""
+
+        response = await self.llm.simple_prompt(prompt, max_tokens=400)
         
-        # Fast JSON parse
-        data = self._parse_json_fast(response)
+        # Parse JSON with multiple fallback strategies
+        import json
+        import re
+        
+        data = None
+        
+        # Strategy 1: Direct parse
+        try:
+            data = json.loads(response.strip())
+        except:
+            pass
+        
+        # Strategy 2: Remove markdown and try again
+        if not data:
+            try:
+                clean = re.sub(r'```(?:json)?\s*|\s*```', '', response)
+                data = json.loads(clean.strip())
+            except:
+                pass
+        
+        # Strategy 3: Find JSON and fix unquoted keys
+        if not data:
+            try:
+                match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', response, re.DOTALL)
+                if match:
+                    json_str = match.group(0)
+                    # Fix unquoted keys
+                    json_str = re.sub(r'(\w+):', r'"\1":', json_str)
+                    # Fix single quotes
+                    json_str = json_str.replace("'", '"')
+                    data = json.loads(json_str)
+            except Exception as e:
+                print(f"  ⚠️  JSON parse failed: {str(e)[:50]}")
+                pass
+        
+        # Strategy 4: Extract action manually
+        if not data:
+            try:
+                action_match = re.search(r'["\']?action["\']?\s*:\s*["\'](\w+)["\']', response, re.IGNORECASE)
+                if action_match:
+                    data = {
+                        "reasoning": "Recovered from malformed JSON",
+                        "action": action_match.group(1),
+                        "query": "",
+                        "complete": False
+                    }
+                    print(f"  ⚠️  Recovered action: {data['action']}")
+            except:
+                pass
         
         if data:
             thought = AgentThought(
                 step=len(previous_thoughts) + 1,
-                reasoning=data.get("reasoning", "")[:150],  # Truncate
+                reasoning=data.get("reasoning", "")[:150],
                 action=data.get("action", "final_answer"),
                 query=data.get("query", ""),
                 complete=data.get("complete", False)
             )
             
-            # Store thought (async, non-blocking would be better but keeping simple)
+            # Store thought with full content
             thought.memory_id = self.memory.remember(
-                f"S{thought.step}: {thought.reasoning[:80]}",
+                f"Step {thought.step}: {thought.reasoning} → {thought.action}",
                 mem_type="thought",
-                importance=0.5  # Lower importance for thoughts
+                importance=0.5
             )
             
             return thought
         
-        # Fallback
+        # Fallback: parsing completely failed
         return AgentThought(
             step=len(previous_thoughts) + 1,
-            reasoning="Parsing failed",
+            reasoning="JSON parsing failed",
             action="final_answer",
             complete=True
         )
     
     async def run(self, task: str, max_steps: int = AGENT_MAX_STEPS) -> str:
-        """Run agent with optimizations."""
+        """Run agent with enhanced memory utilization and proper search synthesis."""
         print(f"\033[96m🤖 FastAgent running...\033[0m\n")
+        
+        # Load context from similar past sessions
+        self.memory.load_past_session_context(task)
         
         thoughts: List[AgentThought] = []
         start_time = time.time()
         
-        # Check if we've done this before (memory)
-        similar_results = self.memory.recall(f"Task '{task[:50]}'", limit=1)
-        if similar_results and "completed" in similar_results[0].content.lower():
-            print(f"\033[93m💡 Found similar past task!\033[0m")
-        
         for step in range(max_steps):
             print(f"\033[96m💭 Step {step + 1}\033[0m")
             
-            # Parallel: Think while previous tool might be executing
             thought = await self._think_fast(task, thoughts)
             
             print(f"\033[2m{thought.reasoning[:100]}\033[0m")
-            print(f"\033[92m→ {thought.action}\033[0m\n")
+            print(f"\033[92m→ {thought.action}\033[0m")
             
             # Execute action
             if thought.action == "final_answer":
-                # Compile final answer with minimal context
-                info = "\n".join([
-                    f"{t.observation[:150]}" for t in thoughts[-3:] if t.observation
-                ])
+                # CRITICAL: Use FRESH search results from THIS session
+                recent_searches = [
+                    t.observation for t in thoughts 
+                    if t.action == "web_search" and t.observation
+                ]
                 
-                final_prompt = f"""Task: {task}
-Info: {info}
+                if recent_searches:
+                    # Use the actual search results from this session
+                    search_data = "\n\n=== NEXT RESULT ===\n\n".join(recent_searches[-3:])  # Last 3 searches
+                    
+                    final_prompt = f"""You are a helpful AI assistant completing this task: {task}
 
-Concise final answer:"""
+You just performed web searches. Here are the actual search results:
 
-                final_answer = await self.llm.simple_prompt(final_prompt, max_tokens=1000)  # Reduced from 2000
+{search_data[:4000]}
+
+Instructions:
+1. Answer the user's question using ONLY information from the search results above
+2. Be specific and concrete - include actual data points (prices, names, numbers, dates, URLs)
+3. If the results contain links, include them
+4. If the results mention specific entities (companies, products, people), name them
+5. Don't add information not present in the results
+6. Don't say "the results show..." - just give the answer directly
+7. Format your response to be maximally useful for the user's specific request
+
+Answer the task concisely and specifically:"""
+                    
+                    print(f"\n\033[93m📊 Using {len(recent_searches)} fresh search results for answer\033[0m")
+                else:
+                    # Fallback if no searches performed
+                    memory_context = self.memory.recall_context(task, max_tokens=800)
+                    
+                    final_prompt = f"""Task: {task}
+
+Available information:
+{memory_context}
+
+Provide a helpful, specific answer using the information available. If you don't have enough information, explain what you would need to answer properly.
+
+Answer:"""
+                    
+                    print(f"\n\033[93m📚 Using memory context for answer\033[0m")
+
+                final_answer = await self.llm.simple_prompt(final_prompt, max_tokens=1000)
                 
-                # Save session
+                # Save session with full context
                 duration = time.time() - start_time
-                self.memory.save_session(task, final_answer[:300], duration)  # Truncated
+                self.memory.save_session(task, final_answer, duration)
                 
                 return final_answer
             
             else:
                 result = await self._execute_tool(thought.action, thought.query)
-                thought.observation = f"{result.data[:200]}" if result.success else f"Error: {result.error}"
+                thought.observation = str(result.data) if result.success else f"Error: {result.error}"
+                
+                # Detect search loops and force synthesis
+                if thought.action == "web_search":
+                    recent_search_count = sum(1 for t in thoughts[-3:] if t.action == "web_search")
+                    if recent_search_count >= 2:
+                        print("  \033[93m⚠️  Detected search loop - forcing final answer\033[0m")
+                        # Force next iteration to synthesize
+                        thought.complete = True
             
-            # Link memory (only if both exist)
+            # Create weighted connection between sequential thoughts
             if thought.memory_id and thoughts and thoughts[-1].memory_id:
-                self.memory.relate(thoughts[-1].memory_id, thought.memory_id)
+                self.memory.relate(thoughts[-1].memory_id, thought.memory_id, weight=1.0)
             
             thoughts.append(thought)
             
             if thought.complete:
                 break
         
-        # Max steps - quick compilation
-        info = " | ".join([f"{t.observation[:100]}" for t in thoughts if t.observation])
-        final_prompt = f"Task: {task}\nInfo: {info}\n\nBrief answer:"
+        # Max steps reached - compile answer from available context
+        recent_searches = [t.observation for t in thoughts if t.action == "web_search" and t.observation]
         
-        return await self.llm.simple_prompt(final_prompt, max_tokens=800)
+        if recent_searches:
+            search_data = "\n\n".join(recent_searches[-2:])
+            final_prompt = f"""Task: {task}
+
+Search Results:
+{search_data[:3000]}
+
+Based on these results, provide a brief answer:"""
+        else:
+            memory_context = self.memory.recall_context(task, max_tokens=800)
+            final_prompt = f"Task: {task}\nInfo: {memory_context}\n\nBrief answer:"
+        
+        final_answer = await self.llm.simple_prompt(final_prompt, max_tokens=800)
+        
+        duration = time.time() - start_time
+        self.memory.save_session(task, final_answer, duration)
+        
+        return final_answer
     
     async def cleanup(self):
         """Cleanup resources."""
-        await self.llm.close()
+        try:
+            if self.llm and hasattr(self.llm, '_client') and self.llm._client:
+                await self.llm.close()
+        except:
+            pass
 
 
 # Backward compatibility
