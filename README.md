@@ -1,8 +1,8 @@
-# EZAgent Complete tutorial 
+# 👾  EZAgent Complete tutorial 
 ## Simple Frame work for Building AI Agents
-Tired of langchain and endless courses on youtube and udemy, want full control?
+Tired of langchain and endless courses on youtube and udemy, want full control? 
 all prayers have been answered,this framework exactly does that, no unneccesary confusion hassle to setup.
-faster and more logical answers and  opensource guess it's christmas like every time of the year!
+faster and more logical answers and  opensource guess it's christmas 🎄 like every time of the year!
 
 ## 1. Getting Started
 
