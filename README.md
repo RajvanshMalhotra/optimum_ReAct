@@ -1,7 +1,5 @@
-# EZAgent Complete tutorial Reference
+# EZAgent Complete tutorial 
 ## Simple Commands for Building AI Agents
-
----
 
 ## 1. Getting Started
 
