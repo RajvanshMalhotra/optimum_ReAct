@@ -1,5 +1,4 @@
-# document agent memory architecture (2025-12-14)
-# EZAgent Complete API Reference
+# EZAgent Complete tutorial Reference
 ## Simple Commands for Building AI Agents
 
 ---
