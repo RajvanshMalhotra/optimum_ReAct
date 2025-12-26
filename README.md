@@ -20,7 +20,7 @@ echo 'TAVILY_API_KEY=your_tavily_key_here' >> .env
 
 ### Import and Create Agent
 ```python
-from ez_agent import EZAgent
+from AgenT import EZAgent
 
 # Create agent with default database
 agent = EZAgent()
@@ -194,7 +194,7 @@ for session in sessions:
 
 ### Example 1: Personal Assistant
 ```python
-from ez_agent import EZAgent
+from AgenT import EZAgent
 
 # Create personal assistant
 assistant = EZAgent("personal_assistant.db")
@@ -219,7 +219,7 @@ for mem in memories:
 
 ### Example 2: Research Assistant
 ```python
-from ez_agent import EZAgent
+from AgenT import EZAgent
 
 researcher = EZAgent("research_assistant.db")
 
@@ -241,7 +241,7 @@ for research in past_research:
 
 ### Example 3: Conversation Bot
 ```python
-from ez_agent import EZAgent
+from AgenTimport EZAgent
 
 bot = EZAgent("chatbot.db")
 
@@ -262,7 +262,7 @@ while True:
 
 ### Example 4: Data Analysis Helper
 ```python
-from ez_agent import EZAgent
+from AgenT import EZAgent
 
 analyzer = EZAgent("data_analyzer.db")
 
@@ -286,7 +286,7 @@ for rec in recommendations:
 
 ### Example 5: Learning Assistant
 ```python
-from ez_agent import EZAgent
+from AgenT import EZAgent
 
 tutor = EZAgent("learning_assistant.db")
 
@@ -394,7 +394,7 @@ conn.close()
 
 ### Basic Error Handling
 ```python
-from ez_agent import EZAgent
+from AgenT import EZAgent
 
 agent = EZAgent()
 
@@ -408,7 +408,7 @@ except Exception as e:
 
 ### Robust Implementation
 ```python
-from ez_agent import EZAgent
+from AgenT import EZAgent
 import logging
 
 # Setup logging
@@ -526,7 +526,7 @@ agent.clear_session()
 
 ### One-Liners
 ```python
-from ez_agent import EZAgent
+from AgenT import EZAgent
 
 # Create and use
 print(EZAgent().ask("What is AI?"))
@@ -562,7 +562,7 @@ deleted = agent.memory.cleanup_old_data(days=30)
 ## 10. Complete API Summary
 
 ```python
-from ez_agent import EZAgent
+from AgenT import EZAgent
 
 # Create
 agent = EZAgent()                    # Default database
@@ -642,4 +642,4 @@ await agent.cleanup()
 
 ---
 
-**That's everything you need to use the EZAgent framework!**
+**That's everything you need to use the AgenT framework hope it's EZ!**
