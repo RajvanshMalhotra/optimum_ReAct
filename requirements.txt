@@ -4,6 +4,7 @@ numpy
 plotly
 requests
 pydantic
+rich
 
 # Search / tools
 tavily-python
