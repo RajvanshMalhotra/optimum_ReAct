@@ -5,6 +5,7 @@ plotly
 requests
 pydantic
 rich
+networkx
 
 # Search / tools
 tavily-python
