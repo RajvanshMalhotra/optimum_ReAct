@@ -4,6 +4,8 @@ Tired of langchain and endless courses on youtube and udemy, want full control?
 all prayers have been answered,this framework exactly does that, no unneccesary confusion hassle to setup.
 faster and more logical answers and  opensource guess it's christmas 🎄 like every time of the year!
 
+have a quick look at https://optimum-react-streamlit.onrender.com/ 
+(P.S lil slow, render free teir)
 ## 1. Getting Started
 
 ### Installation
