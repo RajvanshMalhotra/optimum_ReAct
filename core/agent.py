@@ -1113,6 +1113,19 @@ from config import AGENT_MAX_STEPS
 #             pass
 
 # v3
+"""Optimized autonomous agent with proper search result usage."""
+import time
+import json
+import re
+import asyncio
+from typing import List, Optional
+from models.agent import AgentThought, ToolResult
+from memory.hybrid import HybridMemory
+from core.llm import llm_client
+from tools.registry import tool_registry
+from config import AGENT_MAX_STEPS
+
+
 class FastAgent:
     """Optimized autonomous agent with fixed search synthesis."""
     
@@ -1294,7 +1307,7 @@ Think clearly and decide the most efficient next action. Respond with valid JSON
                     data = {
                         "reasoning": "Recovered from malformed JSON",
                         "action": action_match.group(1),
-                        "query": "",
+                        "query": "",  # Explicitly set empty string
                         "complete": False
                     }
                     print(f"  ⚠️  Recovered action: {data['action']}")
@@ -1306,7 +1319,7 @@ Think clearly and decide the most efficient next action. Respond with valid JSON
                 step=len(previous_thoughts) + 1,
                 reasoning=data.get("reasoning", "")[:150],
                 action=data.get("action", "final_answer"),
-                query=data.get("query", ""),
+                query=str(data.get("query") or ""),  # Ensure it's always a string, never None
                 complete=data.get("complete", False)
             )
             
@@ -1323,6 +1336,7 @@ Think clearly and decide the most efficient next action. Respond with valid JSON
             step=len(previous_thoughts) + 1,
             reasoning="JSON parsing failed",
             action="final_answer",
+            query="",  # Ensure query is always a string
             complete=True
         )
     
@@ -1470,6 +1484,7 @@ Provide a brief, honest answer based on what's available:"""
                 await self.llm.close()
         except Exception as e:
             print(f"Warning: Cleanup failed: {str(e)}")
+
 
 # Backward compatibility
 AutonomousAgent = FastAgent
