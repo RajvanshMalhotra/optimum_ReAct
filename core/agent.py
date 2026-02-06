@@ -1113,21 +1113,10 @@ from config import AGENT_MAX_STEPS
 #             pass
 
 # v3
-"""Optimized autonomous agent with proper search result usage."""
-import time
-import json
-import re
-import asyncio
-from typing import List, Optional
-from models.agent import AgentThought, ToolResult
-from memory.hybrid import HybridMemory
-from core.llm import llm_client
-from tools.registry import tool_registry
-from config import AGENT_MAX_STEPS
 
 
-class FastAgent:
-    """Optimized autonomous agent with fixed search synthesis."""
+class IntelligentAgent:
+    """Agent that trusts LLM intelligence instead of micromanaging with rules."""
     
     def __init__(self, memory: HybridMemory):
         self.memory = memory
@@ -1191,7 +1180,7 @@ class FastAgent:
         # Add recent conversation
         if self.conversation_history:
             context_parts.append("Recent conversation:")
-            for turn in self.conversation_history[-3:]:  # Last 3 turns
+            for turn in self.conversation_history[-3:]:
                 context_parts.append(f"User: {turn['user']}")
                 context_parts.append(f"Assistant: {turn['assistant'][:100]}...")
         
@@ -1200,75 +1189,48 @@ class FastAgent:
         
         return "\n".join(context_parts)
     
-    async def _think_fast(self, task: str, previous_thoughts: List[AgentThought]) -> AgentThought:
-        """Optimized thinking with Ez reasoning system."""
+    async def _think_intelligently(self, task: str, previous_thoughts: List[AgentThought]) -> AgentThought:
+        """Let the LLM think intelligently with MORE reasoning space."""
         
-        # Use context with conversation history
+        # Get context
         context_with_history = self._build_context_with_history(task)
-        memory_context = self.memory.recall_context(context_with_history, max_tokens=400)
+        memory_context = self.memory.recall_context(context_with_history, max_tokens=600)
         
-        recent_thoughts = previous_thoughts[-2:] if len(previous_thoughts) > 2 else previous_thoughts
+        # Build recent steps summary
+        recent_thoughts = previous_thoughts[-3:] if len(previous_thoughts) > 3 else previous_thoughts
         thought_context = "\n".join([
-            f"{t.step}. {t.action}: {t.observation[:100] if t.observation else 'N/A'}"
+            f"Step {t.step}: {t.action} - {t.observation[:150] if t.observation else 'pending'}..."
             for t in recent_thoughts
         ])
         
-        recent_search_count = sum(1 for t in previous_thoughts[-3:] if t.action == "web_search")
-        
-        search_guidance = ""
-        if recent_search_count >= 2:
-            search_guidance = "You've already searched multiple times. Use those results - move to final_answer."
-        elif recent_search_count == 1:
-            search_guidance = "You've searched once. Only search again if you need different/additional information."
-        
-        # Full Ez prompt
-        prompt = f"""You are Ez, a reasoning-focused AI assistant with web search capabilities.
+        # Simple, trust-based prompt - let the LLM think
+        prompt = f"""You are an intelligent AI agent helping with this task:
 
-Your Strengths:
-- Deep analytical and logical reasoning
-- Breaking down complex problems into clear steps
-- Synthesizing information from multiple sources
-- Critical thinking and evaluation of information quality
+TASK: {task}
 
-Your Tool:
-- Web search: Use this to find current, factual information when needed
+AVAILABLE INFORMATION:
+{memory_context if memory_context else "No stored information relevant to this task"}
 
-How You Work:
-1. Think through problems systematically before acting
-2. Use web search strategically - only when you need external information
-3. Evaluate search results critically for relevance and reliability
-4. Reason through the information to provide insightful answers
-5. Be honest about uncertainty and limitations
+WHAT YOU'VE DONE SO FAR:
+{thought_context if thought_context else "This is your first step"}
 
-Communication Style:
-- Clear and direct - no unnecessary fluff
-- Explain your reasoning when it adds value
-- Adapt to the user's needs (technical vs. conversational)
-- Don't over-explain obvious steps
+AVAILABLE TOOLS:
+- web_search: Search the internet for current information
+- ask_user: Ask the user a clarifying question
+- remember: Store information for later
+- recall: Retrieve stored information
+- final_answer: Provide your final answer to the user
 
-Values:
-- Accuracy over speed
-- Practical solutions over theoretical perfection
-- Honesty about what you can and cannot do
-- Continuous learning from each interaction
+THINK STEP BY STEP:
+1. Do I have enough RELEVANT information to answer this task?
+2. If the available information is about a different topic, should I search instead?
+3. What's the most logical next action?
 
-Current Task: {task}
+Respond with JSON:
+{{"reasoning": "your detailed thinking process", "action": "chosen_action", "query": "query for the action if needed", "complete": true/false}}"""
 
-Context: {memory_context[:300] if memory_context else 'Starting fresh'}
-Recent Steps: {thought_context if thought_context else 'First step'}
-{search_guidance}
-
-Available Actions:
-- web_search: Find current/factual information from the internet
-- ask_user: Get clarification or missing information from user
-- remember: Store important information for later use
-- recall: Retrieve previously stored information
-- final_answer: Provide answer when you have sufficient information
-
-Think clearly and decide the most efficient next action. Respond with valid JSON only:
-{{"reasoning": "your logical thought process", "action": "action_name", "query": "specific query if needed", "complete": true/false}}"""
-
-        response = await self.llm.simple_prompt(prompt, max_tokens=400)
+        # Give MORE tokens for reasoning (800 instead of 400)
+        response = await self.llm.simple_prompt(prompt, max_tokens=800)
         
         # Robust JSON parsing
         data = None
@@ -1307,7 +1269,7 @@ Think clearly and decide the most efficient next action. Respond with valid JSON
                     data = {
                         "reasoning": "Recovered from malformed JSON",
                         "action": action_match.group(1),
-                        "query": "",  # Explicitly set empty string
+                        "query": "",
                         "complete": False
                     }
                     print(f"  ⚠️  Recovered action: {data['action']}")
@@ -1317,9 +1279,9 @@ Think clearly and decide the most efficient next action. Respond with valid JSON
         if data:
             thought = AgentThought(
                 step=len(previous_thoughts) + 1,
-                reasoning=data.get("reasoning", "")[:150],
+                reasoning=data.get("reasoning", "")[:200],  # Allow longer reasoning
                 action=data.get("action", "final_answer"),
-                query=str(data.get("query") or ""),  # Ensure it's always a string, never None
+                query=str(data.get("query") or ""),
                 complete=data.get("complete", False)
             )
             
@@ -1334,15 +1296,15 @@ Think clearly and decide the most efficient next action. Respond with valid JSON
         # Fallback
         return AgentThought(
             step=len(previous_thoughts) + 1,
-            reasoning="JSON parsing failed",
-            action="final_answer",
-            query="",  # Ensure query is always a string
-            complete=True
+            reasoning="JSON parsing failed - searching by default",
+            action="web_search",
+            query=task,
+            complete=False
         )
     
     async def run(self, task: str, max_steps: int = AGENT_MAX_STEPS) -> str:
-        """Run Ez agent with enhanced reasoning and search synthesis."""
-        print(f"\033[96m🤖 Ez Agent running...\033[0m\n")
+        """Run intelligent agent."""
+        print(f"\033[96m🤖 Intelligent Agent running...\033[0m\n")
         
         self.memory.load_past_session_context(task)
         
@@ -1352,9 +1314,9 @@ Think clearly and decide the most efficient next action. Respond with valid JSON
         for step in range(max_steps):
             print(f"\033[96m💭 Step {step + 1}\033[0m")
             
-            thought = await self._think_fast(task, thoughts)
+            thought = await self._think_intelligently(task, thoughts)
             
-            print(f"\033[2m{thought.reasoning[:100]}\033[0m")
+            print(f"\033[2m{thought.reasoning[:150]}\033[0m")
             print(f"\033[92m→ {thought.action}\033[0m")
             
             if thought.action == "final_answer":
@@ -1366,50 +1328,29 @@ Think clearly and decide the most efficient next action. Respond with valid JSON
                 if recent_searches:
                     search_data = "\n\n=== NEXT RESULT ===\n\n".join(recent_searches[-3:])
                     
-                    final_prompt = f"""You are Ez, a helpful AI assistant completing this task: {task}
+                    final_prompt = f"""Task: {task}
 
-You just performed web searches. Here are the actual search results:
-
+Search results:
 {search_data[:4000]}
 
-Instructions:
-1. Answer the user's question using ONLY information from the search results above
-2. Be specific and concrete - include actual data points (prices, names, numbers, dates, URLs)
-3. If the results contain links, include them
-4. If the results mention specific entities (companies, products, people), name them
-5. Don't add information not present in the results
-6. Don't say "the results show..." - just give the answer directly
-7. Format your response to be maximally useful for the user's specific request
+Provide a helpful, specific answer using the search results. Include concrete details, names, locations, prices, etc.
 
-Answer the task concisely and specifically:"""
+Answer:"""
                     
-                    print(f"\n\033[93m📊 Using {len(recent_searches)} fresh search results for answer\033[0m")
+                    print(f"\n\033[93m📊 Using {len(recent_searches)} search results\033[0m")
                 else:
                     memory_context = self.memory.recall_context(task, max_tokens=800)
                     
-                    final_prompt = f"""You are Ez, a reasoning-focused AI assistant with web search capabilities.
-
-Your Strengths:
-- Deep analytical and logical reasoning
-- Breaking down complex problems into clear steps
-- Synthesizing information from multiple sources
-- Critical thinking and evaluation of information quality
-
-Task: {task}
+                    final_prompt = f"""Task: {task}
 
 Available information:
 {memory_context}
 
-Values:
-- Accuracy over speed
-- Practical solutions over theoretical perfection
-- Honesty about what you can and cannot do
-
-Provide a helpful, specific answer using the information available. If you don't have enough information, explain what you would need to answer properly.
+Provide a helpful answer. If you don't have enough information, be honest about it.
 
 Answer:"""
                     
-                    print(f"\n\033[93m📚 Using memory context for answer\033[0m")
+                    print(f"\n\033[93m📚 Using memory context\033[0m")
 
                 final_answer = await self.llm.simple_prompt(final_prompt, max_tokens=1000)
                 
@@ -1428,10 +1369,11 @@ Answer:"""
                 result = await self._execute_tool(thought.action, thought.query)
                 thought.observation = str(result.data) if result.success else f"Error: {result.error}"
                 
+                # Simple loop detection - if we've searched 3+ times, force answer
                 if thought.action == "web_search":
-                    recent_search_count = sum(1 for t in thoughts[-3:] if t.action == "web_search")
-                    if recent_search_count >= 2:
-                        print("  \033[93m⚠️  Detected search loop - forcing final answer\033[0m")
+                    recent_search_count = sum(1 for t in thoughts[-4:] if t.action == "web_search")
+                    if recent_search_count >= 3:
+                        print("  \033[93m⚠️  Multiple searches completed - moving to answer\033[0m")
                         thought.complete = True
             
             if thought.memory_id and thoughts and thoughts[-1].memory_id:
@@ -1442,27 +1384,15 @@ Answer:"""
             if thought.complete:
                 break
         
-        # Max steps reached
+        # Max steps reached - generate answer with what we have
         recent_searches = [t.observation for t in thoughts if t.action == "web_search" and t.observation]
         
         if recent_searches:
             search_data = "\n\n".join(recent_searches[-2:])
-            final_prompt = f"""You are Ez, a reasoning-focused AI assistant.
-
-Task: {task}
-
-Search Results:
-{search_data[:3000]}
-
-Based on these results, provide a brief, practical answer:"""
+            final_prompt = f"Task: {task}\n\nSearch results:\n{search_data[:3000]}\n\nProvide a brief answer:"
         else:
             memory_context = self.memory.recall_context(task, max_tokens=800)
-            final_prompt = f"""You are Ez, a reasoning-focused AI assistant.
-
-Task: {task}
-Available Info: {memory_context}
-
-Provide a brief, honest answer based on what's available:"""
+            final_prompt = f"Task: {task}\nInfo: {memory_context}\n\nProvide a brief answer:"
         
         final_answer = await self.llm.simple_prompt(final_prompt, max_tokens=800)
         
@@ -1486,5 +1416,7 @@ Provide a brief, honest answer based on what's available:"""
             print(f"Warning: Cleanup failed: {str(e)}")
 
 
-# Backward compatibility
-AutonomousAgent = FastAgent
+# Aliases
+FastAgent = IntelligentAgent
+AutonomousAgent = IntelligentAgent
+
