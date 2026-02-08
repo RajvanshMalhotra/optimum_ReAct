@@ -16,3 +16,13 @@ python-dotenv
 # Async support
 asyncio
 aiohttp
+
+# Semantic search (embeddings)
+sentence-transformers>=2.2.0
+numpy>=1.21.0
+
+# Optional: For faster vector search at scale
+# faiss-cpu>=1.7.0
+
+# Your existing dependencies (add these if you haven't already)
+# Add whatever other packages your project needs
