@@ -112,6 +112,244 @@ from memory.store import MemoryStore
 from config import MEMORY_PERSIST_BATCH_SIZE, MEMORY_SEARCH_LIMIT
 
 
+# class HybridMemory:
+#     """Hybrid memory system with enhanced search and session tracking."""
+    
+#     def __init__(self, db_path: str):
+#         self.graph = MemoryGraph()
+#         self.store = MemoryStore(db_path)
+#         self.session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+#         self.session_memory_count = 0
+#         self._load_recent_context()
+    
+#     def _load_recent_context(self):
+#         """Load recent important memories from last session into graph."""
+#         # Find similar past sessions
+#         # This is a placeholder - will be called with actual task after agent starts
+#         pass
+    
+#     def load_past_session_context(self, task: str):
+#         """Load relevant context from similar past sessions."""
+#         similar_sessions = self.store.find_similar_sessions(task, limit=3)
+        
+#         if similar_sessions:
+#             print(f"💡 Found {len(similar_sessions)} similar past sessions")
+            
+#             # Load memories from most recent relevant sessions
+#             loaded_count = 0
+#             for session in similar_sessions[:2]:  # Check top 2 sessions
+#                 memories = self.store.get_session_memories(session['id'])
+                
+#                 # Load ALL memories from past sessions (not just high importance)
+#                 # This ensures we recall user preferences, facts, etc.
+#                 for mem in memories:
+#                     if mem.id not in self.graph.nodes:
+#                         self.graph.add_node(mem)
+#                         loaded_count += 1
+            
+#             if loaded_count > 0:
+#                 print(f"   Loaded {loaded_count} memories from past sessions")
+    
+#     def remember(
+#         self, 
+#         content: str, 
+#         mem_type: str = "thought", 
+#         importance: float = 0.5, 
+#         metadata: Dict = None
+#     ) -> str:
+#         """Store new memory with full content."""
+#         current_time = time.time()
+#         node_id = f"{mem_type}_{self.graph.size()}_{int(current_time * 1000)}"
+        
+#         node = MemoryNode(
+#             id=node_id,
+#             type=mem_type,
+#             content=content,  # Store full content, no truncation
+#             metadata=metadata or {},
+#             timestamp=current_time,
+#             last_accessed=current_time,  # Set last_accessed to now
+#             importance=importance
+#         )
+        
+#         self.graph.add_node(node)
+#         self.session_memory_count += 1
+        
+#         # Auto-persist if graph is too large
+#         if self.graph.should_persist():
+#             self._persist_old_memories()
+        
+#         return node_id
+    
+#     def relate(self, from_id: str, to_id: str, weight: float = 1.0):
+#         """Create weighted relationship between memories."""
+#         self.graph.connect(from_id, to_id, weight)
+    
+#     def recall(
+#         self, 
+#         query: str, 
+#         limit: int = MEMORY_SEARCH_LIMIT,
+#         use_graph_traversal: bool = True
+#     ) -> List[MemoryNode]:
+#         """Retrieve relevant memories using multiple strategies."""
+#         results: List[MemoryNode] = []
+#         seen_ids: set = set()
+        
+#         # Strategy 1: Search in-memory graph (keyword-based)
+#         # graph_results = self.graph.search(query, limit=limit)
+#         # for node in graph_results:
+#         #     if node.id not in seen_ids:
+#         #         results.append(node)
+#         #         seen_ids.add(node.id)
+        
+#         graph_results = self.graph.search(query, limit=limit * 2)  # Get more results
+#         for node in graph_results:
+#             if node.id not in seen_ids:
+#                 results.append(node)
+#                 seen_ids.add(node.id)
+    
+#     # If query mentions "me", "my", "I" - prioritize preference/fact types
+#         if any(word in query.lower() for word in ["me", "my", "i", "about me"]):
+#             # Add all fact/preference memories
+#             for node in self.graph.nodes.values():
+#                 if node.type in ["fact", "preference"] and node.id not in seen_ids:
+#                     results.append(node)
+#                     seen_ids.add(node.id)
+#         # Strategy 2: If we have graph results, get related nodes via graph traversal
+#         if use_graph_traversal and graph_results and len(results) < limit:
+#             for node in graph_results[:2]:  # Use top 2 matches as seeds
+#                 related = self.graph.get_related(node.id, depth=2, limit=5)
+#                 for rel_node in related:
+#                     if rel_node.id not in seen_ids and len(results) < limit:
+#                         results.append(rel_node)
+#                         seen_ids.add(rel_node.id)
+        
+#         # Strategy 3: Search SQLite with FTS if still need more
+#         if len(results) < limit:
+#             db_results = self.store.search_similar(query, limit=limit - len(results))
+            
+#             # Load DB results into graph for faster future access
+#             for node in db_results:
+#                 if node.id not in seen_ids:
+#                     if node.id not in self.graph.nodes:
+#                         self.graph.add_node(node)
+#                     results.append(node)
+#                     seen_ids.add(node.id)
+        
+#         return results[:limit]
+    
+#     def recall_context(self, query: str, max_tokens: int = 1000) -> str:
+#         """Recall memories and format for context window with token limit."""
+#         memories = self.recall(query, limit=10)
+        
+#         if not memories:
+#             return "No relevant memories found."
+        
+#         # Build context with token approximation (rough: 1 token ≈ 4 chars)
+#         context_parts = []
+#         current_tokens = 0
+        
+#         for mem in memories:
+#             # Format: [TYPE] content (truncate if needed)
+#             mem_text = f"[{mem.type.upper()}] {mem.content}"
+#             mem_tokens = len(mem_text) // 4
+            
+#             if current_tokens + mem_tokens > max_tokens:
+#                 # Truncate to fit
+#                 remaining_chars = (max_tokens - current_tokens) * 4
+#                 if remaining_chars > 50:  # Only add if meaningful
+#                     mem_text = mem_text[:remaining_chars] + "..."
+#                     context_parts.append(mem_text)
+#                 break
+            
+#             context_parts.append(mem_text)
+#             current_tokens += mem_tokens
+        
+#         return "\n".join(context_parts)
+    
+#     def get_conversation_thread(self, node_id: str, max_depth: int = 5) -> List[MemoryNode]:
+#         """Get conversation thread by following connections."""
+#         return self.graph.get_related(node_id, depth=max_depth, limit=20)
+    
+#     def find_memory_clusters(self) -> List[List[str]]:
+#         """Find clusters of related memories (useful for summarization)."""
+#         return self.graph.find_clusters(min_cluster_size=3)
+    
+#     def _persist_old_memories(self):
+#         """Move old/unimportant memories to SQLite with session tracking."""
+#         to_persist_ids = self.graph.get_nodes_to_evict(count=MEMORY_PERSIST_BATCH_SIZE)
+        
+#         nodes_to_save = []
+#         for node_id in to_persist_ids:
+#             node = self.graph.get_node(node_id)
+#             if node:
+#                 nodes_to_save.append(node)
+#                 self.graph.remove_node(node_id)
+        
+#         if nodes_to_save:
+#             self.store.save_nodes(nodes_to_save, session_id=self.session_id)
+#             print(f"📦 Persisted {len(nodes_to_save)} memories to disk")
+    
+#     def save_session(self, task: str, result: str, duration: float):
+#         """Save completed session with all remaining memories."""
+#         # Persist all remaining graph memories with session link
+#         all_nodes = list(self.graph.nodes.values())
+#         if all_nodes:
+#             self.store.save_nodes(all_nodes, session_id=self.session_id)
+        
+#         # Save session metadata
+#         self.store.save_session(
+#             self.session_id, 
+#             task, 
+#             result, 
+#             duration,
+#             time.time(),
+#             self.session_memory_count
+#         )
+        
+#         print(f"💾 Session saved: {self.session_memory_count} memories")
+    
+#     def get_context_summary(self) -> str:
+#         """Get summary of current memory state."""
+#         stats = self.store.get_stats()
+#         graph_stats = self.graph.get_context_summary()
+        
+#         return (
+#             f"Memory: {graph_stats['total_nodes']} in RAM "
+#             f"({graph_stats.get('types', {})}), "
+#             f"{stats['total_memories']} in DB | "
+#             f"Session: {self.session_id} ({self.session_memory_count} created)"
+#         )
+    
+#     def cleanup_old_data(self, days: int = 30):
+#         """Cleanup old low-value memories."""
+#         deleted = self.store.cleanup_old_memories(days)
+#         print(f"🧹 Cleaned up {deleted} old memories")
+#         return deleted
+    
+#     def get_statistics(self) -> Dict:
+#         """Get detailed statistics for debugging/monitoring."""
+#         store_stats = self.store.get_stats()
+#         graph_stats = self.graph.get_context_summary()
+        
+#         return {
+#             "session_id": self.session_id,
+#             "session_memory_count": self.session_memory_count,
+#             "graph": graph_stats,
+#             "store": store_stats,
+#             "total_memories": graph_stats['total_nodes'] + store_stats['total_memories']
+#         }
+
+"""Hybrid memory system with proper graph utilization and session linking."""
+import time
+from typing import List, Dict, Optional
+from datetime import datetime
+
+from models.memory import MemoryNode
+from memory.graph import MemoryGraph
+from memory.store import MemoryStore
+from config import MEMORY_PERSIST_BATCH_SIZE, MEMORY_SEARCH_LIMIT
+
+
 class HybridMemory:
     """Hybrid memory system with enhanced search and session tracking."""
     
@@ -124,7 +362,6 @@ class HybridMemory:
     
     def _load_recent_context(self):
         """Load recent important memories from last session into graph."""
-        # Find similar past sessions
         # This is a placeholder - will be called with actual task after agent starts
         pass
     
@@ -180,57 +417,82 @@ class HybridMemory:
         
         return node_id
     
-    def relate(self, from_id: str, to_id: str, weight: float = 1.0):
-        """Create weighted relationship between memories."""
-        self.graph.connect(from_id, to_id, weight)
+    def relate(self, from_id: str, to_id: str, weight: float = 1.0, bidirectional: bool = True, strengthen: bool = True):
+        """Create weighted relationship between memories.
+        
+        Args:
+            from_id: Source memory ID
+            to_id: Target memory ID  
+            weight: Connection strength (default 1.0)
+            bidirectional: Create connection in both directions (default True)
+            strengthen: Strengthen existing connections rather than replace (default True)
+        """
+        self.graph.connect(from_id, to_id, weight, bidirectional, strengthen)
     
     def recall(
         self, 
         query: str, 
         limit: int = MEMORY_SEARCH_LIMIT,
-        use_graph_traversal: bool = True
+        use_hybrid: bool = True
     ) -> List[MemoryNode]:
-        """Retrieve relevant memories using multiple strategies."""
+        """Retrieve relevant memories using hybrid search (BM25 + embeddings + graph).
+        
+        Args:
+            query: Search query
+            limit: Max results
+            use_hybrid: Use hybrid search if embeddings available, else BM25 only
+        """
         results: List[MemoryNode] = []
         seen_ids: set = set()
         
-        # Strategy 1: Search in-memory graph (keyword-based)
-        # graph_results = self.graph.search(query, limit=limit)
-        # for node in graph_results:
-        #     if node.id not in seen_ids:
-        #         results.append(node)
-        #         seen_ids.add(node.id)
+        # Use hybrid search if embeddings are enabled
+        if use_hybrid and self.graph._embeddings_enabled:
+            # Hybrid search: BM25 + Embeddings + Graph traversal
+            results = self.graph.hybrid_search(
+                query,
+                limit=limit,
+                keyword_weight=0.4,
+                semantic_weight=0.6,
+                use_graph_expansion=True
+            )
+            seen_ids = {node.id for node in results}
+        else:
+            # Fallback: BM25 keyword search + graph expansion
+            graph_results = self.graph.search(query, limit=limit * 2)
+            
+            for node in graph_results:
+                if node.id not in seen_ids:
+                    results.append(node)
+                    seen_ids.add(node.id)
+            
+            # Graph traversal from top matches
+            if graph_results and len(results) < limit:
+                for node in graph_results[:2]:
+                    related = self.graph.get_related(node.id, depth=2, limit=5)
+                    for rel_node in related:
+                        if rel_node.id not in seen_ids and len(results) < limit:
+                            results.append(rel_node)
+                            seen_ids.add(rel_node.id)
         
-        graph_results = self.graph.search(query, limit=limit * 2)  # Get more results
-        for node in graph_results:
-            if node.id not in seen_ids:
-                results.append(node)
-                seen_ids.add(node.id)
-    
-    # If query mentions "me", "my", "I" - prioritize preference/fact types
+        # Boost personal preference queries
         if any(word in query.lower() for word in ["me", "my", "i", "about me"]):
-            # Add all fact/preference memories
+            # Add all fact/preference memories not already in results
             for node in self.graph.nodes.values():
                 if node.type in ["fact", "preference"] and node.id not in seen_ids:
                     results.append(node)
                     seen_ids.add(node.id)
-        # Strategy 2: If we have graph results, get related nodes via graph traversal
-        if use_graph_traversal and graph_results and len(results) < limit:
-            for node in graph_results[:2]:  # Use top 2 matches as seeds
-                related = self.graph.get_related(node.id, depth=2, limit=5)
-                for rel_node in related:
-                    if rel_node.id not in seen_ids and len(results) < limit:
-                        results.append(rel_node)
-                        seen_ids.add(rel_node.id)
         
-        # Strategy 3: Search SQLite with FTS if still need more
+        # Search SQLite if still need more results
         if len(results) < limit:
             db_results = self.store.search_similar(query, limit=limit - len(results))
             
-            # Load DB results into graph for faster future access
-            for node in db_results:
+            # Check available space before re-hydrating
+            available_space = self.graph.max_nodes - self.graph.size()
+            
+            for i, node in enumerate(db_results):
                 if node.id not in seen_ids:
-                    if node.id not in self.graph.nodes:
+                    # Only re-hydrate into graph if there's space
+                    if i < available_space and node.id not in self.graph.nodes:
                         self.graph.add_node(node)
                     results.append(node)
                     seen_ids.add(node.id)
@@ -290,7 +552,7 @@ class HybridMemory:
             print(f"📦 Persisted {len(nodes_to_save)} memories to disk")
     
     def save_session(self, task: str, result: str, duration: float):
-        """Save completed session with all remaining memories."""
+        """Save completed session with all remaining memories and clear the graph."""
         # Persist all remaining graph memories with session link
         all_nodes = list(self.graph.nodes.values())
         if all_nodes:
@@ -307,6 +569,14 @@ class HybridMemory:
         )
         
         print(f"💾 Session saved: {self.session_memory_count} memories")
+        
+        # Clear the graph for next session
+        self.graph.clear()
+        print(f"🧹 Graph cleared. Ready for next session.")
+        
+        # Generate new session ID for next session
+        self.session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.session_memory_count = 0
     
     def get_context_summary(self) -> str:
         """Get summary of current memory state."""
