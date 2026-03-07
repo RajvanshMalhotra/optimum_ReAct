@@ -9,7 +9,9 @@ from pathlib import Path
 import pandas as pd
 from datetime import datetime
 from io import StringIO
-
+import sys
+if 'torch' in sys.modules:
+    pass  # torch already imported
 # Page config
 st.set_page_config(
     page_title="EZAgent Dashboard",
