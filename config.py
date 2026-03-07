@@ -47,4 +47,4 @@ LOG_FILE_PATH = DATA_DIR / "agent_logs.jsonl"
 
 # Validate required keys
 if not GROQ_API_KEY:
-    raise ValueError("GROQ_API_KEY not found in environment")
+    print("Warning: GROQ_API_KEY not set, expecting it from request")
