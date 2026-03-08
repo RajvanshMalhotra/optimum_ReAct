@@ -1,7 +1,7 @@
 """
 optimum_ReAct — Palantir-style Fused Intelligence Backend
 ===========================================================
-Frontend : Vercel (akvani-v2.jsx)
+Frontend : Vercel (gotham-v2.jsx)
 Backend  : AWS EC2 (this file)
 
 FIXES vs previous version:
@@ -22,7 +22,7 @@ from typing import Optional
 from functools import partial
 
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
@@ -33,11 +33,11 @@ from AgenT import EZAgent
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)s  %(message)s")
-log = logging.getLogger("akvani-api")
+log = logging.getLogger("gotham-api")
 
 # ── App ───────────────────────────────────────────────────────────────────────
 app = FastAPI(
-    title="AkashVani Orbital — Fused Intelligence API",
+    title="Gotham Orbital — Fused Intelligence API",
     description="Palantir-style satellite movement history + live news fusion",
     version="3.1.0",
 )
@@ -49,7 +49,7 @@ app.add_middleware(
 )
 
 # ── Config ────────────────────────────────────────────────────────────────────
-DB_PATH      = os.getenv("AGENT_DB_PATH", "data/akvani_agent.db")
+DB_PATH      = os.getenv("AGENT_DB_PATH", "data/gotham_agent.db")
 TAVILY_KEY   = os.getenv("TAVILY_API_KEY", "")
 TAVILY_URL   = "https://api.tavily.com/search"
 MAX_NEWS     = 4
@@ -153,15 +153,22 @@ SAT_BY_ID     = {s["id"]: s for s in SAT_CATALOG}
 
 # ── Agent singleton ───────────────────────────────────────────────────────────
 _agent: Optional[EZAgent] = None
+_agent_groq_key: str = ""   # tracks which key the current agent was built with
 _lock  = asyncio.Lock()
 
-async def get_agent() -> EZAgent:
-    global _agent
+async def get_agent(groq_key: str = "") -> EZAgent:
+    """Return agent singleton, reinitialising if the Groq key has changed."""
+    global _agent, _agent_groq_key
+    effective_key = groq_key or os.getenv("GROQ_API_KEY", "")
     async with _lock:
-        if _agent is None:
-            log.info(f"Initializing EZAgent — DB: {DB_PATH}")
+        if _agent is None or effective_key != _agent_groq_key:
+            log.info(f"Initializing EZAgent — DB: {DB_PATH} — key: {'(from header)' if groq_key else '(from env)'}")
+            # Inject key into environment so EZAgent picks it up
+            if effective_key:
+                os.environ["GROQ_API_KEY"] = effective_key
             loop = asyncio.get_event_loop()
             _agent = await loop.run_in_executor(None, EZAgent, DB_PATH)
+            _agent_groq_key = effective_key
             log.info("EZAgent ready")
     return _agent
 
@@ -213,14 +220,15 @@ def ground_region(lat, lon):
 
 
 # ── Tavily news search ────────────────────────────────────────────────────────
-async def search_news(query: str) -> list:
-    if not TAVILY_KEY:
-        log.warning("TAVILY_API_KEY not set — skipping news")
+async def search_news(query: str, tavily_key: str = "") -> list:
+    key = tavily_key or TAVILY_KEY
+    if not key:
+        log.warning("No Tavily key — skipping news")
         return []
     try:
         async with httpx.AsyncClient(timeout=8.0) as client:
             resp = await client.post(TAVILY_URL, json={
-                "api_key": TAVILY_KEY, "query": query,
+                "api_key": key, "query": query,
                 "search_depth": "basic", "max_results": MAX_NEWS, "include_answer": False,
             })
             resp.raise_for_status()
@@ -326,7 +334,7 @@ def atlas_system_prompt() -> str:
         f"{s['id']}:{s['name']}({s['owner']},threat={THREAT_LABELS[s['threat']]})"
         for s in SAT_CATALOG
     )
-    return f"""You are ATLAS — senior satellite intelligence analyst on the Akashvani Orbital platform.
+    return f"""You are ATLAS — senior satellite intelligence analyst on the Gotham Orbital platform.
 
 SATELLITE CATALOG:
 {catalog}
@@ -407,7 +415,7 @@ async def refresh_tles():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "service": "AkashVani-orbital", "version": "3.1.0",
+    return {"status": "ok", "service": "gotham-orbital", "version": "3.1.0",
             "ts": utcnow(), "satellites": len(SAT_CATALOG), "db": DB_PATH, "tavily": bool(TAVILY_KEY)}
 
 @app.get("/satellites")
@@ -416,25 +424,29 @@ async def list_satellites():
             "catalog": [{**s, "threat_label": THREAT_LABELS[s["threat"]]} for s in SAT_CATALOG]}
 
 @app.post("/ingest", response_model=IngestResponse)
-async def ingest_snapshot(req: IngestRequest):
+async def ingest_snapshot(req: IngestRequest,
+                          x_groq_key: str = Header(default=""),
+                          x_tavily_key: str = Header(default="")):
     if not req.snapshot.strip():
         raise HTTPException(400, "snapshot cannot be empty")
-    agent  = await get_agent()
+    agent  = await get_agent(x_groq_key)
     stored = await store_snapshot(agent, req.snapshot, req.cycle)
     return IngestResponse(stored=stored, cycle=req.cycle, ts=utcnow())
 
 @app.post("/intel-query", response_model=IntelQueryResponse)
-async def intel_query(req: IntelQueryRequest):
+async def intel_query(req: IntelQueryRequest,
+                      x_groq_key: str = Header(default=""),
+                      x_tavily_key: str = Header(default="")):
     if not req.query.strip():
         raise HTTPException(400, "query cannot be empty")
 
     log.info(f"Intel query: {req.query!r}")
-    agent   = await get_agent()
+    agent   = await get_agent(x_groq_key)
     sat_ids = extract_sat_ids(req.query) or [s["id"] for s in SAT_CATALOG if s["threat"] >= 2]
 
     history_result, news_results = await asyncio.gather(
         recall_history(agent, sat_ids),
-        search_news(build_tavily_query(req.query, sat_ids)),
+        search_news(build_tavily_query(req.query, sat_ids), x_tavily_key),
     )
     proximity_alerts = check_proximity(req.satellite_snapshot) if req.satellite_snapshot else []
 
@@ -472,9 +484,11 @@ async def intel_query(req: IntelQueryRequest):
                               proximity=proximity_alerts, ts=utcnow())
 
 @app.post("/agent", response_model=AgentResponse)
-async def run_agent(req: AgentRequest):
+async def run_agent(req: AgentRequest,
+                    x_groq_key: str = Header(default=""),
+                    x_tavily_key: str = Header(default="")):
     SYS = {
-        "orbital": "You are ORBITAL-1. Real SGP4 positions, Mar-2025 TLEs. 4-5 bullet intel. [ORBITAL-1] header. Terse.",
+        "orbital": "You are ORBITAL-1. Real SGP4 positions, live TLEs. 4-5 bullet intel. [ORBITAL-1] header. Terse.",
         "news":    "You are NEWS-1, geopolitical OSINT. [NEWS-1] then [SOURCE] HEADLINE — implication. 3 bullets.",
         "analyst": "You are ANALYST-1.\n[ANALYST-1] SYNTHESIS\nIF [actor][action] THEN [effect] RESULT [outcome]\nRECOMMENDATION: [48h action] CONFIDENCE: [HIGH/MED/LOW]",
     }
@@ -486,7 +500,7 @@ async def run_agent(req: AgentRequest):
     full_task = f"{SYS[role]}\n\n---\n\n{snap}{req.user_message}"
 
     try:
-        agent    = await get_agent()
+        agent    = await get_agent(x_groq_key)
         response = await _ask(agent, full_task, max_steps=5)
     except Exception as e:
         log.error(f"Agent [{role}] error: {e}")
