@@ -160,6 +160,7 @@ async def get_agent(groq_key: str = "") -> EZAgent:
     """Return agent singleton, reinitialising if the Groq key has changed."""
     global _agent, _agent_groq_key
     effective_key = groq_key or os.getenv("GROQ_API_KEY", "")
+    print(effective_key,"this is effective key")  # Debug print to verify key retrieval
     async with _lock:
         if _agent is None or effective_key != _agent_groq_key:
             log.info(f"Initializing EZAgent — DB: {DB_PATH} — key: {'(from header)' if groq_key else '(from env)'}")
@@ -222,6 +223,7 @@ def ground_region(lat, lon):
 # ── Tavily news search ────────────────────────────────────────────────────────
 async def search_news(query: str, tavily_key: str = "") -> list:
     key = tavily_key or TAVILY_KEY
+    print(key,"this is tavily key")  # Debug print to verify key retrieval
     if not key:
         log.warning("No Tavily key — skipping news")
         return []
