@@ -1,7 +1,7 @@
 """
 optimum_ReAct — Palantir-style Fused Intelligence Backend
 ===========================================================
-Frontend : Vercel (gotham-v2.jsx)
+Frontend : Vercel (akvani-v2.jsx)
 Backend  : AWS EC2 (this file)
 
 FIXES vs previous version:
@@ -33,11 +33,11 @@ from AgenT import EZAgent
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)s  %(message)s")
-log = logging.getLogger("gotham-api")
+log = logging.getLogger("akvani-api")
 
 # ── App ───────────────────────────────────────────────────────────────────────
 app = FastAPI(
-    title="Gotham Orbital — Fused Intelligence API",
+    title="AkashVani Orbital — Fused Intelligence API",
     description="Palantir-style satellite movement history + live news fusion",
     version="3.1.0",
 )
@@ -49,13 +49,86 @@ app.add_middleware(
 )
 
 # ── Config ────────────────────────────────────────────────────────────────────
-DB_PATH      = os.getenv("AGENT_DB_PATH", "data/gotham_agent.db")
+DB_PATH      = os.getenv("AGENT_DB_PATH", "data/akvani_agent.db")
 TAVILY_KEY   = os.getenv("TAVILY_API_KEY", "")
 TAVILY_URL   = "https://api.tavily.com/search"
 MAX_NEWS     = 4
 PROXIMITY_KM = 500
 
 os.makedirs(os.path.dirname(DB_PATH) if os.path.dirname(DB_PATH) else ".", exist_ok=True)
+
+# ── Live TLE fetching ─────────────────────────────────────────────────────────
+# NORAD catalog numbers for our 14 satellites
+NORAD_IDS = {
+    "ISS":        25544,
+    "TIANGONG":   48274,
+    "NOAA19":     33591,
+    "TERRA":      25994,
+    "AQUA":       27424,
+    "SENTINEL2B": 42063,
+    "STARLINK30": 44235,
+    "STARLINK31": 44249,
+    "IRIDIUM140": 43478,
+    "GPS001":     32711,
+    "GLONASS":    32276,
+    "COSMOS2543": 44547,
+    "YAOGAN30":   43163,
+    "LACROSSE5":  28646,
+}
+
+# Cache: {sat_id: {"line1": ..., "line2": ..., "fetched_at": ...}}
+_tle_cache: dict = {}
+_tle_lock = asyncio.Lock()
+TLE_TTL_HOURS = 6  # refresh every 6 hours
+
+async def fetch_tle_celestrak(norad_id: int) -> tuple[str, str] | None:
+    """Fetch a single TLE from Celestrak by NORAD ID."""
+    url = f"https://celestrak.org/SATCAT/TLE/?CATNR={norad_id}"
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(url)
+            r.raise_for_status()
+            lines = [l.strip() for l in r.text.strip().splitlines() if l.strip()]
+            # Response is: NAME\nLINE1\nLINE2
+            if len(lines) >= 3:
+                return lines[1], lines[2]
+            elif len(lines) == 2 and lines[0].startswith("1 "):
+                return lines[0], lines[1]
+    except Exception as e:
+        log.warning(f"Celestrak fetch failed for {norad_id}: {e}")
+    return None
+
+async def fetch_all_tles() -> dict:
+    """Fetch TLEs for all satellites, update cache."""
+    results = {}
+    now = datetime.now(timezone.utc)
+    tasks = {sat_id: fetch_tle_celestrak(norad_id) for sat_id, norad_id in NORAD_IDS.items()}
+    fetched = await asyncio.gather(*tasks.values(), return_exceptions=True)
+    for sat_id, result in zip(tasks.keys(), fetched):
+        if isinstance(result, tuple) and result:
+            results[sat_id] = {"line1": result[0], "line2": result[1], "fetched_at": now.isoformat()}
+            log.info(f"TLE fetched: {sat_id}")
+        else:
+            log.warning(f"TLE fetch failed for {sat_id}: {result}")
+    return results
+
+async def get_tles_cached() -> dict:
+    """Return cached TLEs, refreshing if stale or missing."""
+    global _tle_cache
+    async with _tle_lock:
+        now = datetime.now(timezone.utc)
+        # Check if cache is fresh
+        if _tle_cache:
+            sample = next(iter(_tle_cache.values()))
+            fetched_at = datetime.fromisoformat(sample["fetched_at"])
+            age_hours = (now - fetched_at).total_seconds() / 3600
+            if age_hours < TLE_TTL_HOURS:
+                return _tle_cache
+        log.info("Refreshing TLE cache from Celestrak...")
+        fresh = await fetch_all_tles()
+        if fresh:
+            _tle_cache = fresh
+        return _tle_cache
 
 # ── Satellite catalog ─────────────────────────────────────────────────────────
 SAT_CATALOG = [
@@ -253,7 +326,7 @@ def atlas_system_prompt() -> str:
         f"{s['id']}:{s['name']}({s['owner']},threat={THREAT_LABELS[s['threat']]})"
         for s in SAT_CATALOG
     )
-    return f"""You are ATLAS — senior satellite intelligence analyst on the Gotham Orbital platform.
+    return f"""You are ATLAS — senior satellite intelligence analyst on the Akashvani Orbital platform.
 
 SATELLITE CATALOG:
 {catalog}
@@ -316,9 +389,25 @@ def utcnow() -> str:
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 
+@app.get("/tles")
+async def get_tles_endpoint():
+    """Return live TLEs for all tracked satellites. Cached for 6 hours."""
+    tles = await get_tles_cached()
+    if not tles:
+        raise HTTPException(503, "TLE fetch failed — Celestrak may be unavailable")
+    return {"count": len(tles), "tles": tles, "ttl_hours": TLE_TTL_HOURS, "ts": utcnow()}
+
+@app.post("/tles/refresh")
+async def refresh_tles():
+    """Force-refresh TLE cache from Celestrak."""
+    global _tle_cache
+    _tle_cache = {}
+    tles = await get_tles_cached()
+    return {"refreshed": len(tles), "ts": utcnow()}
+
 @app.get("/health")
 async def health():
-    return {"status": "ok", "service": "gotham-orbital", "version": "3.1.0",
+    return {"status": "ok", "service": "AkashVani-orbital", "version": "3.1.0",
             "ts": utcnow(), "satellites": len(SAT_CATALOG), "db": DB_PATH, "tavily": bool(TAVILY_KEY)}
 
 @app.get("/satellites")
