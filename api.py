@@ -706,7 +706,7 @@ import math
 import asyncio
 import logging
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, Any
 from functools import partial
 
 import httpx
@@ -717,7 +717,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from AgenT import EZAgent
+# ── NOTE: EZAgent imported inside get_agent() after env vars are set ──────────
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)s  %(message)s")
@@ -838,24 +838,29 @@ VALID_IDS     = {s["id"] for s in SAT_CATALOG}
 SAT_BY_ID     = {s["id"]: s for s in SAT_CATALOG}
 
 # ── Agent singleton ───────────────────────────────────────────────────────────
-_agent: Optional[EZAgent] = None
+_agent: Optional[Any] = None
 _agent_groq_key: str = ""   # tracks which key the current agent was built with
 _lock  = asyncio.Lock()
 
-async def get_agent(groq_key: str = "", tavily_key: str = "") -> EZAgent:
-    """Return agent singleton, reinitialising if keys have changed."""
+async def get_agent(groq_key: str = "", tavily_key: str = "") -> Any:
+    """Return agent singleton, rebuilding whenever keys are provided via header."""
     global _agent, _agent_groq_key
     effective_groq   = groq_key   or os.getenv("GROQ_API_KEY",   "")
     effective_tavily = tavily_key or os.getenv("TAVILY_API_KEY",  "")
+
+    if not effective_groq:
+        raise HTTPException(status_code=401, detail="Groq API key required. Send via x-groq-key header.")
+
     async with _lock:
         if _agent is None or effective_groq != _agent_groq_key:
-            log.info(f"Initializing EZAgent — groq: {effective_groq[:8]}... tavily: {'set' if effective_tavily else 'not set'}")
-            if effective_groq:
-                os.environ["GROQ_API_KEY"]   = effective_groq
-            if effective_tavily:
-                os.environ["TAVILY_API_KEY"] = effective_tavily
+            log.info(f"Building EZAgent — groq: {effective_groq[:8]}... tavily: {'set' if effective_tavily else 'unset'}")
+            os.environ["GROQ_API_KEY"]   = effective_groq
+            os.environ["TAVILY_API_KEY"] = effective_tavily
+            _agent = None  # discard old instance first
             loop = asyncio.get_event_loop()
-            _agent = await loop.run_in_executor(None, EZAgent, DB_PATH)
+            # Deferred import — happens AFTER env vars are set
+            from AgenT import EZAgent as _EZAgent
+            _agent = await loop.run_in_executor(None, _EZAgent, DB_PATH)
             _agent_groq_key = effective_groq
             log.info("EZAgent ready")
     return _agent
@@ -997,37 +1002,6 @@ def extract_sat_ids(query: str) -> list:
     return [sid for sid in VALID_IDS if sid in query.upper()]
 
 
-def atlas_system_prompt() -> str:
-    catalog = " | ".join(
-        f"{s['id']}:{s['name']}({s['owner']},threat={THREAT_LABELS[s['threat']]})"
-        for s in SAT_CATALOG
-    )
-    return f"""You are ATLAS — senior satellite intelligence analyst on the Gotham Orbital platform.
-
-SATELLITE CATALOG:
-{catalog}
-
-RESPONSE FORMAT:
-[ATLAS] FUSED INTELLIGENCE BRIEF
-===================================
-SUBJECT: [satellite(s) or topic]
-TIMEFRAME: [period covered]
-
-MOVEMENT ANALYSIS:
-  [trajectory, regions overflown, patterns, anomalies]
-
-GEOPOLITICAL CORRELATION:
-  [connect satellite activity to news context]
-
-ASSESSMENT:
-  IF [observed pattern] THEN [likely intent] RESULT [strategic implication]
-
-CONFIDENCE: [HIGH/MED/LOW] — [reason]
-WATCH: [what to monitor in next 24-48h]
-===================================
-End with exactly: RELEVANT OBJECTS: [comma-separated IDs]
-
-Rules: intel-officer tone, terse, name real countries/operators, flag proximity events."""
 
 
 # ── Pydantic models ───────────────────────────────────────────────────────────
@@ -1115,25 +1089,24 @@ async def intel_query(req: IntelQueryRequest,
     history_result   = await recall_history(agent, sat_ids)
     proximity_alerts = check_proximity(req.satellite_snapshot) if req.satellite_snapshot else []
 
-    current_pos_block = ""
+    current_pos = ""
     if req.satellite_snapshot:
         lines = [l for l in req.satellite_snapshot.splitlines() if any(s in l for s in sat_ids)]
-        if lines:
-            current_pos_block = "CURRENT SGP4 POSITIONS:\n" + "\n".join(f"  {l}" for l in lines)
+        if lines: current_pos = "Current positions:\n" + "\n".join(lines)
 
-    proximity_block = ("PROXIMITY ALERTS:\n" + "\n".join(f"  ⚠ {a}" for a in proximity_alerts)) if proximity_alerts else ""
+    proximity = ("Proximity alerts:\n" + "\n".join(proximity_alerts)) if proximity_alerts else ""
 
+    # Keep task short — agent decides whether to call web_search
     fused_task = "\n\n".join(filter(bool, [
-        atlas_system_prompt(), "---",
-        f"ANALYST QUERY: {req.query}", f"TIMESTAMP: {utcnow()}",
-        current_pos_block,
-        f"MOVEMENT HISTORY:\n{history_result}",
-        proximity_block,
-        "Use web_search if you need current geopolitical context or recent news about these satellites or their operators. Correlate movement patterns with geopolitical context. Reason about intent.",
+        f"You are ATLAS, a satellite intelligence analyst. Answer this query: {req.query}",
+        current_pos,
+        f"Movement history:\n{history_result}" if history_result != "No movement history yet." else "",
+        proximity,
+        "Use web_search for current news if relevant. End response with: RELEVANT OBJECTS: [IDs]"
     ]))
 
     try:
-        response = await _ask(agent, fused_task, max_steps=8)
+        response = await _ask(agent, fused_task, max_steps=6)
     except Exception as e:
         log.error(f"ATLAS error: {e}")
         raise HTTPException(500, str(e))
@@ -1147,17 +1120,17 @@ async def intel_query(req: IntelQueryRequest,
 async def run_agent(req: AgentRequest,
                     x_groq_key: str = Header(default=""),
                     x_tavily_key: str = Header(default="")):
-    SYS = {
-        "orbital": "You are ORBITAL-1. Real SGP4 positions, live TLEs. 4-5 bullet intel. [ORBITAL-1] header. Terse.",
-        "news":    "You are NEWS-1, geopolitical OSINT. [NEWS-1] then [SOURCE] HEADLINE — implication. 3 bullets.",
-        "analyst": "You are ANALYST-1.\n[ANALYST-1] SYNTHESIS\nIF [actor][action] THEN [effect] RESULT [outcome]\nRECOMMENDATION: [48h action] CONFIDENCE: [HIGH/MED/LOW]",
+    ROLE_TASK = {
+        "orbital": "Analyze these satellite positions and give a 4-5 bullet intel brief. Start with [ORBITAL-1].",
+        "news":    "Give a 3-bullet geopolitical OSINT brief about these satellite operators. Use web_search for latest news. Start with [NEWS-1].",
+        "analyst": "Synthesize the orbital and news intel. Start with [ANALYST-1] SYNTHESIS. Format: IF [actor][action] THEN [effect]. End with RECOMMENDATION and CONFIDENCE level.",
     }
     role = req.role.lower().strip()
-    if role not in SYS:
+    if role not in ROLE_TASK:
         raise HTTPException(400, f"Unknown role '{role}'. Use: orbital | news | analyst")
 
-    snap = f"Live SGP4 {utcnow()}:\n{req.satellite_snapshot}\n\n" if req.satellite_snapshot else ""
-    full_task = f"{SYS[role]}\n\n---\n\n{snap}{req.user_message}"
+    snap = f"Satellite positions ({utcnow()}):\n{req.satellite_snapshot}\n\n" if req.satellite_snapshot else ""
+    full_task = f"{snap}{req.user_message}\n\nTask: {ROLE_TASK[role]}"
 
     try:
         agent    = await get_agent(x_groq_key, x_tavily_key)
