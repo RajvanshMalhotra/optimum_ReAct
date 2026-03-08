@@ -686,18 +686,25 @@
 #     uvicorn.run("api:app", host="0.0.0.0", port=port, reload=False, workers=1)
 
 
+
+
+
 """
 optimum_ReAct — Palantir-style Fused Intelligence Backend
 ===========================================================
-Frontend : Vercel (gotham-v2.jsx)
-Backend  : AWS EC2 (this file)
+Frontend : Vercel (gotham-v4.jsx)
+Backend  : AWS EC2 via Docker
 
-FIXES vs previous version:
-  - Removed calls to non-existent async methods (remember_async, recall_async,
-    stats_async, clear_async, ask_async with kwargs that don't exist)
-  - EZAgent.ask_async() takes only (task, max_steps) — no system_prompt kwarg
-  - All "async" wrappers now run sync HybridMemory methods in a thread executor
-  - atlas_system_prompt is injected INTO the task string, not as a kwarg
+KEY CHANGES IN THIS VERSION:
+  - web_search is NO LONGER instructed in task strings.
+    The agent uses it autonomously only when it decides it needs current info.
+  - Removed "Use web_search" from intel-query and all agent role tasks.
+  - news role no longer forces a search — it reasons first and searches only
+    if it lacks sufficient context.
+  - EZAgent deferred import (Docker fix: env var set before module init).
+  - workers=1 (process-global singleton safe).
+  - HTTP 401 raised immediately if no Groq key.
+  - HTTPException re-raised cleanly in all routes.
 """
 
 import os
@@ -710,24 +717,22 @@ from typing import Optional, Any
 from functools import partial
 
 import httpx
-from fastapi import FastAPI, HTTPException, Header, Request
+from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# ── NOTE: EZAgent imported inside get_agent() after env vars are set ──────────
+# EZAgent is imported INSIDE get_agent() after env vars are set — Docker fix.
 
-# ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)s  %(message)s")
 log = logging.getLogger("gotham-api")
 
-# ── App ───────────────────────────────────────────────────────────────────────
 app = FastAPI(
     title="Gotham Orbital — Fused Intelligence API",
     description="Palantir-style satellite movement history + live news fusion",
-    version="3.1.0",
+    version="3.4.0",
 )
 app.add_middleware(
     CORSMiddleware,
@@ -736,7 +741,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── Config ────────────────────────────────────────────────────────────────────
 DB_PATH      = os.getenv("AGENT_DB_PATH", "data/gotham_agent.db")
 TAVILY_KEY   = os.getenv("TAVILY_API_KEY", "")
 PROXIMITY_KM = 500
@@ -744,7 +748,6 @@ PROXIMITY_KM = 500
 os.makedirs(os.path.dirname(DB_PATH) if os.path.dirname(DB_PATH) else ".", exist_ok=True)
 
 # ── Live TLE fetching ─────────────────────────────────────────────────────────
-# NORAD catalog numbers for our 14 satellites
 NORAD_IDS = {
     "ISS":        25544,
     "TIANGONG":   48274,
@@ -762,20 +765,17 @@ NORAD_IDS = {
     "LACROSSE5":  28646,
 }
 
-# Cache: {sat_id: {"line1": ..., "line2": ..., "fetched_at": ...}}
 _tle_cache: dict = {}
 _tle_lock = asyncio.Lock()
-TLE_TTL_HOURS = 6  # refresh every 6 hours
+TLE_TTL_HOURS = 6
 
-async def fetch_tle_celestrak(norad_id: int) -> tuple[str, str] | None:
-    """Fetch a single TLE from Celestrak by NORAD ID."""
+async def fetch_tle_celestrak(norad_id: int):
     url = f"https://celestrak.org/NORAD/elements/gp.php?CATNR={norad_id}&FORMAT=TLE"
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             r = await client.get(url)
             r.raise_for_status()
             lines = [l.strip() for l in r.text.strip().splitlines() if l.strip()]
-            # Response is: NAME\nLINE1\nLINE2
             if len(lines) >= 3:
                 return lines[1], lines[2]
             elif len(lines) == 2 and lines[0].startswith("1 "):
@@ -785,7 +785,6 @@ async def fetch_tle_celestrak(norad_id: int) -> tuple[str, str] | None:
     return None
 
 async def fetch_all_tles() -> dict:
-    """Fetch TLEs for all satellites, update cache."""
     results = {}
     now = datetime.now(timezone.utc)
     tasks = {sat_id: fetch_tle_celestrak(norad_id) for sat_id, norad_id in NORAD_IDS.items()}
@@ -799,16 +798,13 @@ async def fetch_all_tles() -> dict:
     return results
 
 async def get_tles_cached() -> dict:
-    """Return cached TLEs, refreshing if stale or missing."""
     global _tle_cache
     async with _tle_lock:
         now = datetime.now(timezone.utc)
-        # Check if cache is fresh
         if _tle_cache:
             sample = next(iter(_tle_cache.values()))
             fetched_at = datetime.fromisoformat(sample["fetched_at"])
-            age_hours = (now - fetched_at).total_seconds() / 3600
-            if age_hours < TLE_TTL_HOURS:
+            if (now - fetched_at).total_seconds() / 3600 < TLE_TTL_HOURS:
                 return _tle_cache
         log.info("Refreshing TLE cache from Celestrak...")
         fresh = await fetch_all_tles()
@@ -839,56 +835,53 @@ SAT_BY_ID     = {s["id"]: s for s in SAT_CATALOG}
 
 # ── Agent singleton ───────────────────────────────────────────────────────────
 _agent: Optional[Any] = None
-_agent_groq_key: str = ""   # tracks which key the current agent was built with
-_lock  = asyncio.Lock()
+_agent_groq_key: str  = ""
+_lock = asyncio.Lock()
 
 async def get_agent(groq_key: str = "", tavily_key: str = "") -> Any:
-    """Return agent singleton, rebuilding whenever keys are provided via header."""
     global _agent, _agent_groq_key
-    effective_groq   = groq_key   or os.getenv("GROQ_API_KEY",   "")
-    effective_tavily = tavily_key or os.getenv("TAVILY_API_KEY",  "")
+    effective_groq   = groq_key   or os.getenv("GROQ_API_KEY",  "")
+    effective_tavily = tavily_key or os.getenv("TAVILY_API_KEY", "")
 
     if not effective_groq:
-        raise HTTPException(status_code=401, detail="Groq API key required. Send via x-groq-key header.")
+        raise HTTPException(status_code=401,
+                            detail="Groq API key required. Send via x-groq-key header.")
 
     async with _lock:
         if _agent is None or effective_groq != _agent_groq_key:
-            log.info(f"Building EZAgent — groq: {effective_groq[:8]}... tavily: {'set' if effective_tavily else 'unset'}")
+            log.info(f"Building EZAgent — groq: {effective_groq[:8]}...")
             os.environ["GROQ_API_KEY"]   = effective_groq
             os.environ["TAVILY_API_KEY"] = effective_tavily
-            _agent = None  # discard old instance first
-            loop = asyncio.get_event_loop()
-            # Deferred import — happens AFTER env vars are set
+            _agent = None
+
             from AgenT import EZAgent as _EZAgent
+            loop = asyncio.get_event_loop()
             _agent = await loop.run_in_executor(None, _EZAgent, DB_PATH)
             _agent_groq_key = effective_groq
             log.info("EZAgent ready")
     return _agent
 
 
-# ── Async wrappers for sync HybridMemory methods ──────────────────────────────
-# EZAgent wraps HybridMemory. remember() and recall() are synchronous.
-# We run them in a thread executor to avoid blocking FastAPI's event loop.
-
-async def _remember(agent: EZAgent, content: str) -> str:
+# ── Async wrappers ────────────────────────────────────────────────────────────
+async def _remember(agent: Any, content: str) -> str:
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(
         None, partial(agent.memory.remember, content, mem_type="fact", importance=0.8)
     )
 
-async def _recall(agent: EZAgent, query: str, limit: int = 10) -> list:
+async def _recall(agent: Any, query: str, limit: int = 10) -> list:
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(
         None, partial(agent.memory.recall, query, limit)
     )
 
-async def _ask(agent: EZAgent, task: str, max_steps: int = 6) -> str:
+async def _ask(agent: Any, task: str, max_steps: int = 6) -> str:
     for attempt in range(3):
         try:
             return await agent.ask_async(task, max_steps=max_steps)
         except Exception as e:
             if "429" in str(e) and attempt < 2:
-                wait = 2 ** attempt * 3  # 3s, 6s
+                wait = 2 ** attempt * 3
                 log.warning(f"Groq 429 — retrying in {wait}s (attempt {attempt+1})")
                 await asyncio.sleep(wait)
             else:
@@ -920,7 +913,6 @@ def ground_region(lat, lon):
     else:           return "OPEN OCEAN"
 
 
-
 # ── Movement history helpers ──────────────────────────────────────────────────
 def _format_pos(sat_id: str, pos: dict, cycle: int) -> str:
     meta = SAT_BY_ID.get(sat_id, {})
@@ -932,7 +924,7 @@ def _format_pos(sat_id: str, pos: dict, cycle: int) -> str:
         f"threat={THREAT_LABELS[meta.get('threat', 0)]} — cycle={cycle}"
     )
 
-async def store_snapshot(agent: EZAgent, snapshot_text: str, cycle: int) -> int:
+async def store_snapshot(agent: Any, snapshot_text: str, cycle: int) -> int:
     pattern = re.compile(
         r"(?P<id>[A-Z0-9]+)\([^)]+\):\s*"
         r"lat=(?P<lat>-?\d+\.?\d*)\s+"
@@ -952,7 +944,7 @@ async def store_snapshot(agent: EZAgent, snapshot_text: str, cycle: int) -> int:
     log.info(f"Cycle {cycle} — stored {stored} records")
     return stored
 
-async def recall_history(agent: EZAgent, sat_ids: list) -> str:
+async def recall_history(agent: Any, sat_ids: list) -> str:
     blocks = []
     for sat_id in sat_ids:
         results = await _recall(agent, f"SAT_HISTORY {sat_id} position movement", limit=10)
@@ -1002,8 +994,6 @@ def extract_sat_ids(query: str) -> list:
     return [sid for sid in VALID_IDS if sid in query.upper()]
 
 
-
-
 # ── Pydantic models ───────────────────────────────────────────────────────────
 class IngestRequest(BaseModel):
     snapshot: str
@@ -1041,7 +1031,6 @@ def utcnow() -> str:
 
 @app.get("/tles")
 async def get_tles_endpoint():
-    """Return live TLEs for all tracked satellites. Cached for 6 hours."""
     tles = await get_tles_cached()
     if not tles:
         raise HTTPException(503, "TLE fetch failed — Celestrak may be unavailable")
@@ -1049,7 +1038,6 @@ async def get_tles_endpoint():
 
 @app.post("/tles/refresh")
 async def refresh_tles():
-    """Force-refresh TLE cache from Celestrak."""
     global _tle_cache
     _tle_cache = {}
     tles = await get_tles_cached()
@@ -1057,8 +1045,11 @@ async def refresh_tles():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "service": "gotham-orbital", "version": "3.1.0",
-            "ts": utcnow(), "satellites": len(SAT_CATALOG), "db": DB_PATH, "tavily": bool(TAVILY_KEY)}
+    return {
+        "status": "ok", "service": "gotham-orbital", "version": "3.4.0",
+        "ts": utcnow(), "satellites": len(SAT_CATALOG), "db": DB_PATH,
+        "tavily": bool(TAVILY_KEY), "groq_env": bool(os.getenv("GROQ_API_KEY")),
+    }
 
 @app.get("/satellites")
 async def list_satellites():
@@ -1067,7 +1058,7 @@ async def list_satellites():
 
 @app.post("/ingest", response_model=IngestResponse)
 async def ingest_snapshot(req: IngestRequest,
-                          x_groq_key: str = Header(default=""),
+                          x_groq_key:   str = Header(default=""),
                           x_tavily_key: str = Header(default="")):
     if not req.snapshot.strip():
         raise HTTPException(400, "snapshot cannot be empty")
@@ -1077,7 +1068,7 @@ async def ingest_snapshot(req: IngestRequest,
 
 @app.post("/intel-query", response_model=IntelQueryResponse)
 async def intel_query(req: IntelQueryRequest,
-                      x_groq_key: str = Header(default=""),
+                      x_groq_key:   str = Header(default=""),
                       x_tavily_key: str = Header(default="")):
     if not req.query.strip():
         raise HTTPException(400, "query cannot be empty")
@@ -1092,49 +1083,78 @@ async def intel_query(req: IntelQueryRequest,
     current_pos = ""
     if req.satellite_snapshot:
         lines = [l for l in req.satellite_snapshot.splitlines() if any(s in l for s in sat_ids)]
-        if lines: current_pos = "Current positions:\n" + "\n".join(lines)
+        if lines:
+            current_pos = "Current SGP4 positions:\n" + "\n".join(lines)
 
-    proximity = ("Proximity alerts:\n" + "\n".join(proximity_alerts)) if proximity_alerts else ""
+    proximity_block = ("Proximity alerts:\n" + "\n".join(proximity_alerts)) if proximity_alerts else ""
 
-    # Keep task short — agent decides whether to call web_search
+    # ── No "use web_search" instruction — agent searches only if it decides to ──
     fused_task = "\n\n".join(filter(bool, [
         f"You are ATLAS, a satellite intelligence analyst. Answer this query: {req.query}",
+        f"Timestamp: {utcnow()}",
         current_pos,
         f"Movement history:\n{history_result}" if history_result != "No movement history yet." else "",
-        proximity,
-        "Use web_search for current news if relevant. End response with: RELEVANT OBJECTS: [IDs]"
+        proximity_block,
+        (
+            "Produce a structured brief: MOVEMENT ANALYSIS / GEOPOLITICAL CORRELATION / "
+            "ASSESSMENT (IF..THEN..RESULT) / CONFIDENCE / WATCH.\n"
+            "End with: RELEVANT OBJECTS: [comma-separated satellite IDs]"
+        ),
     ]))
 
     try:
         response = await _ask(agent, fused_task, max_steps=6)
+    except HTTPException:
+        raise
     except Exception as e:
         log.error(f"ATLAS error: {e}")
         raise HTTPException(500, str(e))
 
-    relevant_ids = parse_relevant_ids(response)
-    return IntelQueryResponse(response=response, relevant_ids=relevant_ids,
-                              news_used=0, history_sats=sat_ids,
-                              proximity=proximity_alerts, ts=utcnow())
+    return IntelQueryResponse(
+        response=response, relevant_ids=parse_relevant_ids(response),
+        news_used=0, history_sats=sat_ids,
+        proximity=proximity_alerts, ts=utcnow(),
+    )
 
 @app.post("/agent", response_model=AgentResponse)
 async def run_agent(req: AgentRequest,
-                    x_groq_key: str = Header(default=""),
+                    x_groq_key:   str = Header(default=""),
                     x_tavily_key: str = Header(default="")):
+    # ── Role tasks: no "use web_search" — agent searches only when it needs to ──
     ROLE_TASK = {
-        "orbital": "Analyze these satellite positions and give a 4-5 bullet intel brief. Start with [ORBITAL-1].",
-        "news":    "Give a 3-bullet geopolitical OSINT brief about these satellite operators. Use web_search for latest news. Start with [NEWS-1].",
-        "analyst": "Synthesize the orbital and news intel. Start with [ANALYST-1] SYNTHESIS. Format: IF [actor][action] THEN [effect]. End with RECOMMENDATION and CONFIDENCE level.",
+        "orbital": (
+            "You are ORBITAL-1. Analyze the satellite positions above and give a "
+            "4-5 bullet intel brief covering regions overflown and any anomalies. "
+            "Start your response with [ORBITAL-1]."
+        ),
+        "news": (
+            "You are NEWS-1, a geopolitical OSINT analyst. Give a 3-bullet brief "
+            "about the strategic context of these satellite operators. "
+            "Start your response with [NEWS-1]."
+            # Note: no "use web_search" — agent will search if it lacks context
+        ),
+        "analyst": (
+            "You are ANALYST-1. Synthesize the intel provided. "
+            "Start with [ANALYST-1] SYNTHESIS. "
+            "Format each finding as: IF [actor][action] THEN [effect] RESULT [outcome]. "
+            "End with RECOMMENDATION and CONFIDENCE level."
+        ),
     }
+
     role = req.role.lower().strip()
     if role not in ROLE_TASK:
         raise HTTPException(400, f"Unknown role '{role}'. Use: orbital | news | analyst")
 
     snap = f"Satellite positions ({utcnow()}):\n{req.satellite_snapshot}\n\n" if req.satellite_snapshot else ""
+
+    # user_message is the actual task content; role instruction is a trailing directive
     full_task = f"{snap}{req.user_message}\n\nTask: {ROLE_TASK[role]}"
 
     try:
         agent    = await get_agent(x_groq_key, x_tavily_key)
         response = await _ask(agent, full_task, max_steps=5)
+    except HTTPException:
+        raise
     except Exception as e:
         log.error(f"Agent [{role}] error: {e}")
         raise HTTPException(500, str(e))
@@ -1148,11 +1168,13 @@ async def satellite_history(sat_id: str, limit: int = 20):
         raise HTTPException(404, f"Unknown satellite ID '{sat_id}'")
     agent   = await get_agent()
     results = await _recall(agent, f"SAT_HISTORY {sat_id}", limit=limit)
-    return {"sat_id": sat_id, "name": SAT_BY_ID[sat_id]["name"],
-            "owner": SAT_BY_ID[sat_id]["owner"], "threat": THREAT_LABELS[SAT_BY_ID[sat_id]["threat"]],
-            "count": len(results),
-            "history": [r.content if hasattr(r, "content") else str(r) for r in results],
-            "ts": utcnow()}
+    return {
+        "sat_id": sat_id, "name": SAT_BY_ID[sat_id]["name"],
+        "owner": SAT_BY_ID[sat_id]["owner"], "threat": THREAT_LABELS[SAT_BY_ID[sat_id]["threat"]],
+        "count": len(results),
+        "history": [r.content if hasattr(r, "content") else str(r) for r in results],
+        "ts": utcnow(),
+    }
 
 @app.get("/stats")
 async def stats():
@@ -1173,6 +1195,8 @@ async def clear_memory():
         await loop.run_in_executor(None, agent.clear_session)
         _agent = None
         return {"cleared": True, "ts": utcnow()}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(500, str(e))
 
@@ -1181,4 +1205,4 @@ async def clear_memory():
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", 8000))
-    uvicorn.run("api:app", host="0.0.0.0", port=port, reload=False, workers=2)
+    uvicorn.run("api:app", host="0.0.0.0", port=port, reload=False, workers=1)
