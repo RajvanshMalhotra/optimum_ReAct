@@ -739,8 +739,6 @@ app.add_middleware(
 # ── Config ────────────────────────────────────────────────────────────────────
 DB_PATH      = os.getenv("AGENT_DB_PATH", "data/gotham_agent.db")
 TAVILY_KEY   = os.getenv("TAVILY_API_KEY", "")
-TAVILY_URL   = "https://api.tavily.com/search"
-MAX_NEWS     = 4
 PROXIMITY_KM = 500
 
 os.makedirs(os.path.dirname(DB_PATH) if os.path.dirname(DB_PATH) else ".", exist_ok=True)
@@ -844,19 +842,21 @@ _agent: Optional[EZAgent] = None
 _agent_groq_key: str = ""   # tracks which key the current agent was built with
 _lock  = asyncio.Lock()
 
-async def get_agent(groq_key: str = "") -> EZAgent:
-    """Return agent singleton, reinitialising if the Groq key has changed."""
+async def get_agent(groq_key: str = "", tavily_key: str = "") -> EZAgent:
+    """Return agent singleton, reinitialising if keys have changed."""
     global _agent, _agent_groq_key
-    effective_key = groq_key or os.getenv("GROQ_API_KEY", "")
+    effective_groq   = groq_key   or os.getenv("GROQ_API_KEY",   "")
+    effective_tavily = tavily_key or os.getenv("TAVILY_API_KEY",  "")
     async with _lock:
-        if _agent is None or effective_key != _agent_groq_key:
-            log.info(f"Initializing EZAgent — DB: {DB_PATH} — key: {'(from header)' if groq_key else '(from env)'}")
-            # Inject key into environment so EZAgent picks it up
-            if effective_key:
-                os.environ["GROQ_API_KEY"] = effective_key
+        if _agent is None or effective_groq != _agent_groq_key:
+            log.info(f"Initializing EZAgent — groq: {effective_groq[:8]}... tavily: {'set' if effective_tavily else 'not set'}")
+            if effective_groq:
+                os.environ["GROQ_API_KEY"]   = effective_groq
+            if effective_tavily:
+                os.environ["TAVILY_API_KEY"] = effective_tavily
             loop = asyncio.get_event_loop()
             _agent = await loop.run_in_executor(None, EZAgent, DB_PATH)
-            _agent_groq_key = effective_key
+            _agent_groq_key = effective_groq
             log.info("EZAgent ready")
     return _agent
 
@@ -914,26 +914,6 @@ def ground_region(lat, lon):
     elif lat < -60: return "ANTARCTIC"
     else:           return "OPEN OCEAN"
 
-
-# ── Tavily news search ────────────────────────────────────────────────────────
-async def search_news(query: str, tavily_key: str = "") -> list:
-    key = tavily_key or TAVILY_KEY
-    if not key:
-        log.warning("No Tavily key — skipping news")
-        return []
-    try:
-        async with httpx.AsyncClient(timeout=8.0) as client:
-            resp = await client.post(TAVILY_URL, json={
-                "api_key": key, "query": query,
-                "search_depth": "basic", "max_results": MAX_NEWS, "include_answer": False,
-            })
-            resp.raise_for_status()
-            return [{"title": r.get("title",""), "url": r.get("url",""),
-                     "snippet": r.get("content","")[:300]}
-                    for r in resp.json().get("results", [])]
-    except Exception as e:
-        log.warning(f"Tavily failed: {e}")
-        return []
 
 
 # ── Movement history helpers ──────────────────────────────────────────────────
@@ -1016,14 +996,6 @@ def check_proximity(snapshot_text: str) -> list:
 def extract_sat_ids(query: str) -> list:
     return [sid for sid in VALID_IDS if sid in query.upper()]
 
-def build_tavily_query(user_query: str, sat_ids: list) -> str:
-    owners = list({SAT_BY_ID[sid]["owner"] for sid in sat_ids if sid in SAT_BY_ID})
-    extras = []
-    if any(o in ("Russia", "China/PLA", "CNSA") for o in owners):
-        extras.append("satellite military intelligence 2025")
-    if sat_ids:
-        extras.append(" ".join(sat_ids[:2]))
-    return f"{user_query.strip()} {' '.join(extras)}".strip()
 
 def atlas_system_prompt() -> str:
     catalog = " | ".join(
@@ -1125,7 +1097,7 @@ async def ingest_snapshot(req: IngestRequest,
                           x_tavily_key: str = Header(default="")):
     if not req.snapshot.strip():
         raise HTTPException(400, "snapshot cannot be empty")
-    agent  = await get_agent(x_groq_key)
+    agent  = await get_agent(x_groq_key, x_tavily_key)
     stored = await store_snapshot(agent, req.snapshot, req.cycle)
     return IngestResponse(stored=stored, cycle=req.cycle, ts=utcnow())
 
@@ -1137,13 +1109,10 @@ async def intel_query(req: IntelQueryRequest,
         raise HTTPException(400, "query cannot be empty")
 
     log.info(f"Intel query: {req.query!r}")
-    agent   = await get_agent(x_groq_key)
+    agent   = await get_agent(x_groq_key, x_tavily_key)
     sat_ids = extract_sat_ids(req.query) or [s["id"] for s in SAT_CATALOG if s["threat"] >= 2]
 
-    history_result, news_results = await asyncio.gather(
-        recall_history(agent, sat_ids),
-        search_news(build_tavily_query(req.query, sat_ids), x_tavily_key),
-    )
+    history_result   = await recall_history(agent, sat_ids)
     proximity_alerts = check_proximity(req.satellite_snapshot) if req.satellite_snapshot else []
 
     current_pos_block = ""
@@ -1152,31 +1121,26 @@ async def intel_query(req: IntelQueryRequest,
         if lines:
             current_pos_block = "CURRENT SGP4 POSITIONS:\n" + "\n".join(f"  {l}" for l in lines)
 
-    news_block = ("LIVE NEWS:\n" + "\n".join(
-        f"  [{i+1}] {n['title']}\n       {n['snippet']}" for i, n in enumerate(news_results)
-    )) if news_results else "LIVE NEWS: none"
-
     proximity_block = ("PROXIMITY ALERTS:\n" + "\n".join(f"  ⚠ {a}" for a in proximity_alerts)) if proximity_alerts else ""
 
-    # Inject system prompt INTO the task — EZAgent has no system_prompt param
     fused_task = "\n\n".join(filter(bool, [
         atlas_system_prompt(), "---",
         f"ANALYST QUERY: {req.query}", f"TIMESTAMP: {utcnow()}",
         current_pos_block,
         f"MOVEMENT HISTORY:\n{history_result}",
-        news_block, proximity_block,
-        "Correlate movement patterns with geopolitical news. Reason about intent.",
+        proximity_block,
+        "Use web_search if you need current geopolitical context or recent news about these satellites or their operators. Correlate movement patterns with geopolitical context. Reason about intent.",
     ]))
 
     try:
-        response = await _ask(agent, fused_task, max_steps=6)
+        response = await _ask(agent, fused_task, max_steps=8)
     except Exception as e:
         log.error(f"ATLAS error: {e}")
         raise HTTPException(500, str(e))
 
     relevant_ids = parse_relevant_ids(response)
     return IntelQueryResponse(response=response, relevant_ids=relevant_ids,
-                              news_used=len(news_results), history_sats=sat_ids,
+                              news_used=0, history_sats=sat_ids,
                               proximity=proximity_alerts, ts=utcnow())
 
 @app.post("/agent", response_model=AgentResponse)
@@ -1196,7 +1160,7 @@ async def run_agent(req: AgentRequest,
     full_task = f"{SYS[role]}\n\n---\n\n{snap}{req.user_message}"
 
     try:
-        agent    = await get_agent(x_groq_key)
+        agent    = await get_agent(x_groq_key, x_tavily_key)
         response = await _ask(agent, full_task, max_steps=5)
     except Exception as e:
         log.error(f"Agent [{role}] error: {e}")
