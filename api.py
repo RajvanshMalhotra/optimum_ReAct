@@ -83,7 +83,7 @@ TLE_TTL_HOURS = 6  # refresh every 6 hours
 
 async def fetch_tle_celestrak(norad_id: int) -> tuple[str, str] | None:
     """Fetch a single TLE from Celestrak by NORAD ID."""
-    url = f"https://celestrak.org/SATCAT/TLE/?CATNR={norad_id}"
+    url = f"https://celestrak.org/NORAD/elements/gp.php?CATNR={norad_id}&FORMAT=TLE"
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             r = await client.get(url)
