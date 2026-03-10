@@ -1,4 +1,4 @@
 from .llm import llm_client, LLMClient
-from .agent import FastAgent, AutonomousAgent
+from .agent import FastAgent
 
-__all__ = ['llm_client', 'LLMClient', 'FastAgent', 'AutonomousAgent']
+__all__ = ['llm_client', 'LLMClient', 'FastAgent']
