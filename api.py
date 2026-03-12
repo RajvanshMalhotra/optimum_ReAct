@@ -1214,9 +1214,19 @@ import re
 import math
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional, Any
 from functools import partial
+
+try:
+    from sgp4.api import Satrec, jday
+    SGP4_AVAILABLE = True
+except ImportError:
+    SGP4_AVAILABLE = False
+    logging.getLogger("gotham-api").warning(
+        "sgp4 not installed — ground track prediction disabled. "
+        "Run: pip install sgp4"
+    )
 
 import httpx
 from fastapi import FastAPI, HTTPException, Header
@@ -1234,7 +1244,7 @@ log = logging.getLogger("gotham-api")
 app = FastAPI(
     title="Gotham Orbital — Fused Intelligence API",
     description="Palantir-style satellite movement history + live news fusion",
-    version="3.5.0",
+    version="3.6.0",
 )
 app.add_middleware(
     CORSMiddleware,
@@ -1497,6 +1507,85 @@ def extract_sat_ids(query: str) -> list:
     return [sid for sid in VALID_IDS if sid in query.upper()]
 
 
+# ── Ground track prediction (SGP4, next 90 min in 15-min steps) ───────────────
+def compute_ground_tracks(sat_ids: list, tles: dict, minutes: int = 90, step: int = 15) -> dict:
+    """
+    Propagate each satellite forward from now in `step`-minute intervals
+    up to `minutes` ahead. Returns dict of sat_id → list of
+    {"ts", "lat", "lon", "alt_km", "region"}.
+    Falls back gracefully if sgp4 not installed or TLE missing.
+    """
+    if not SGP4_AVAILABLE:
+        return {sid: [] for sid in sat_ids}
+
+    tracks = {}
+    now = datetime.now(timezone.utc)
+
+    for sid in sat_ids:
+        tle = tles.get(sid)
+        if not tle:
+            tracks[sid] = []
+            continue
+        try:
+            sat = Satrec.twoline2rv(tle["line1"], tle["line2"])
+            points = []
+            for offset in range(0, minutes + step, step):
+                t = now + timedelta(minutes=offset)
+                jd, fr = jday(t.year, t.month, t.day, t.hour, t.minute, t.second + t.microsecond / 1e6)
+                e, r, _ = sat.sgp4(jd, fr)
+                if e != 0:
+                    continue  # propagation error for this step
+                # r is ECI (km). Convert to lat/lon/alt via simple approximation.
+                x, y, z = r
+                alt_km = math.sqrt(x**2 + y**2 + z**2) - 6371.0
+                lat = math.degrees(math.atan2(z, math.sqrt(x**2 + y**2)))
+                # GMST rotation to get geodetic longitude
+                gmst = _gmst(jd + fr)
+                lon = math.degrees(math.atan2(y, x)) - math.degrees(gmst)
+                lon = (lon + 180) % 360 - 180  # normalise to [-180, 180]
+                points.append({
+                    "ts":      t.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "lat":     round(lat, 2),
+                    "lon":     round(lon, 2),
+                    "alt_km":  round(alt_km, 1),
+                    "region":  ground_region(lat, lon),
+                    "t_plus":  f"+{offset}min",
+                })
+            tracks[sid] = points
+        except Exception as e:
+            log.warning(f"Ground track failed for {sid}: {e}")
+            tracks[sid] = []
+    return tracks
+
+
+def _gmst(jd_full: float) -> float:
+    """Greenwich Mean Sidereal Time in radians from full Julian date."""
+    T = (jd_full - 2451545.0) / 36525.0
+    gmst_sec = (67310.54841
+                + (876600 * 3600 + 8640184.812866) * T
+                + 0.093104 * T**2
+                - 6.2e-6 * T**3)
+    return math.radians((gmst_sec % 86400) / 86400 * 360)
+
+
+def _format_ground_tracks_for_prompt(tracks: dict) -> str:
+    """Render predicted ground tracks as a compact text block for the agent prompt."""
+    if not any(tracks.values()):
+        return ""
+    lines = ["Predicted ground tracks (next 90 min, SGP4):"]
+    for sid, points in tracks.items():
+        if not points:
+            lines.append(f"  {sid}: propagation unavailable")
+            continue
+        meta = SAT_BY_ID.get(sid, {})
+        for p in points:
+            lines.append(
+                f"  {sid} ({meta.get('owner','?')}) {p['t_plus']}: "
+                f"lat={p['lat']} lon={p['lon']} alt={p['alt_km']}km over {p['region']}"
+            )
+    return "\n".join(lines)
+
+
 # ── Retrieval gate ────────────────────────────────────────────────────────────
 # Injected into fused_task before the synthesis instruction.
 # Forces the agent to verify it holds hard orbital data before drawing conclusions.
@@ -1537,10 +1626,15 @@ class IngestResponse(BaseModel):
 class IntelQueryRequest(BaseModel):
     query:              str
     satellite_snapshot: str = ""
+    current_cycle:      int = 0   # caller passes the current ingest cycle number
 
 class IntelQueryResponse(BaseModel):
-    response: str; relevant_ids: list; news_used: int
-    history_sats: list; proximity: list; ts: str
+    response:      str
+    relevant_ids:  list
+    history_sats:  list
+    proximity:     list
+    ground_tracks: dict   # sat_id → list of predicted positions (next 90 min)
+    ts:            str
 
 class AgentRequest(BaseModel):
     role: str; user_message: str; satellite_snapshot: str = ""
@@ -1578,7 +1672,7 @@ async def refresh_tles():
 @app.get("/health")
 async def health():
     return {
-        "status": "ok", "service": "gotham-orbital", "version": "3.5.0",
+        "status": "ok", "service": "gotham-orbital", "version": "3.6.0",
         "ts": utcnow(), "satellites": len(SAT_CATALOG), "db": DB_PATH,
         "tavily": bool(TAVILY_KEY), "groq_env": bool(os.getenv("GROQ_API_KEY")),
     }
@@ -1605,12 +1699,17 @@ async def intel_query(req: IntelQueryRequest,
     if not req.query.strip():
         raise HTTPException(400, "query cannot be empty")
 
-    log.info(f"Intel query: {req.query!r}")
+    log.info(f"Intel query: {req.query!r} (cycle={req.current_cycle})")
     agent   = await get_agent(x_groq_key, x_tavily_key)
     sat_ids = extract_sat_ids(req.query) or [s["id"] for s in SAT_CATALOG if s["threat"] >= 2]
 
     history_result   = await recall_history(agent, sat_ids)
     proximity_alerts = check_proximity(req.satellite_snapshot) if req.satellite_snapshot else []
+
+    # ── Ground track prediction ───────────────────────────────────────────────
+    tles = await get_tles_cached()
+    ground_tracks      = compute_ground_tracks(sat_ids, tles)
+    ground_track_block = _format_ground_tracks_for_prompt(ground_tracks)
 
     current_pos = ""
     if req.satellite_snapshot:
@@ -1626,25 +1725,31 @@ async def intel_query(req: IntelQueryRequest,
             "You are rigorous, methodical, and intellectually honest. "
             "You do not speculate beyond your data. "
             "Your credibility depends on the precision and sourcing of every claim you make. "
+            "Before searching the web, first check whether any satellites in the provided "
+            "catalog (COSMOS2543, YAOGAN30, LACROSSE5, GPS001, GLONASS, TIANGONG) are "
+            "relevant to the query — use their orbital data as your primary source. "
             f"Answer this query: {req.query}"
         ),
-        f"Timestamp: {utcnow()}",
+        f"Timestamp: {utcnow()} — Current ingest cycle: {req.current_cycle}",
         current_pos,
+        ground_track_block,
         f"Movement history:\n{history_result}" if history_result != "No movement history yet." else "",
         proximity_block,
         RETRIEVAL_GATE,
         (
             "Once all retrieval gates are satisfied, produce a structured brief using ONLY "
             "retrieved or clearly inferred data:\n\n"
-            "  MOVEMENT ANALYSIS   — specific positions, altitudes, regions [tag each claim]\n"
-            "  GEOPOLITICAL CONTEXT — conflict zones overflown, actor interests [tag each claim]\n"
-            "  ASSESSMENT          — IF [actor][action] THEN [effect] RESULT [outcome]\n"
-            "                        Use only [RETRIEVED] or [INFERRED] claims here.\n"
-            "  DATA GAPS           — explicitly list what orbital or geopolitical data\n"
-            "                        was unavailable or could not be retrieved.\n"
-            "  CONFIDENCE          — state as percentage with explicit reasoning.\n"
-            "                        Confidence above 80% requires at least 2 [RETRIEVED] claims.\n"
-            "  WATCH               — specific follow-on retrieval actions recommended.\n\n"
+            "  MOVEMENT ANALYSIS    — specific positions, altitudes, regions [tag each claim]\n"
+            "  PREDICTED COVERAGE   — based on ground tracks above, which conflict zones will\n"
+            "                         each satellite overfly in the next 90 minutes [INFERRED]\n"
+            "  GEOPOLITICAL CONTEXT — conflict zones currently active, actor interests [tag each claim]\n"
+            "  ASSESSMENT           — IF [actor][action] THEN [effect] RESULT [outcome]\n"
+            "                         Use only [RETRIEVED] or [INFERRED] claims here.\n"
+            "  DATA GAPS            — explicitly list what orbital or geopolitical data\n"
+            "                         was unavailable or could not be retrieved.\n"
+            "  CONFIDENCE           — state as percentage with explicit reasoning.\n"
+            "                         Confidence above 80% requires at least 2 [RETRIEVED] claims.\n"
+            "  WATCH                — specific follow-on retrieval actions recommended.\n\n"
             "End with: RELEVANT OBJECTS: [comma-separated satellite IDs]"
         ),
     ]))
@@ -1658,9 +1763,12 @@ async def intel_query(req: IntelQueryRequest,
         raise HTTPException(500, str(e))
 
     return IntelQueryResponse(
-        response=response, relevant_ids=parse_relevant_ids(response),
-        news_used=0, history_sats=sat_ids,
-        proximity=proximity_alerts, ts=utcnow(),
+        response=response,
+        relevant_ids=parse_relevant_ids(response),
+        history_sats=sat_ids,
+        proximity=proximity_alerts,
+        ground_tracks=ground_tracks,
+        ts=utcnow(),
     )
 
 @app.post("/agent", response_model=AgentResponse)
@@ -1712,6 +1820,7 @@ async def run_agent(req: AgentRequest,
             "  DATA GAPS         — what you could not retrieve and why it matters\n"
             "  CONFIDENCE        — percentage + explicit justification\n"
             "  RECOMMENDATION    — specific, actionable, named"
+            "Before searching the web, first check whether any satellites in the provided catalog  are relevant to the query."
         ),
     }
 
