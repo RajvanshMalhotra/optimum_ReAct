@@ -2,12 +2,15 @@
 test_agent.py
 =============
 Tests for full agent run with web search.
-Run with: python test_agent.py
+Run with: python test4.py
 """
 
 import asyncio
 import time
-from core.agent import FastAgent, HybridMemory
+import tempfile
+import os
+from core.agent import FastAgent
+from memory.hybrid import HybridMemory
 
 
 # ==============================================================================
@@ -19,20 +22,27 @@ FAIL = "\033[91m❌ FAIL\033[0m"
 SEP  = "=" * 60
 
 
-def assert_answer(answer: str, must_contain: list[str], test_name: str):
-    """Check that the answer contains expected keywords."""
+def make_memory() -> HybridMemory:
+    """Create a fresh HybridMemory backed by a temp SQLite file."""
+    db_file = os.path.join(tempfile.mkdtemp(), "test_memory.db")
+    return HybridMemory(db_path=db_file)
+
+
+def assert_answer(answer: str, must_contain: list[str], test_name: str) -> bool:
+    """Check that the answer contains at least one of the expected keywords."""
     answer_lower = answer.lower()
     missing = [kw for kw in must_contain if kw.lower() not in answer_lower]
     if not missing:
         print(f"{PASS} {test_name}")
+        return True
     else:
         print(f"{FAIL} {test_name}")
         print(f"       Missing keywords: {missing}")
         print(f"       Answer snippet: {answer[:200]}")
-    return len(missing) == 0
+        return False
 
 
-def assert_not_empty(answer: str, test_name: str):
+def assert_not_empty(answer: str, test_name: str) -> bool:
     """Check that the agent returned a non-empty answer."""
     ok = bool(answer and answer.strip())
     print(f"{PASS if ok else FAIL} {test_name}")
@@ -49,8 +59,7 @@ async def test_basic_factual_search():
     print("TEST 1 — Basic factual web search")
     print(SEP)
 
-    memory = HybridMemory()
-    agent = FastAgent(memory=memory)
+    agent = FastAgent(memory=make_memory())
 
     start = time.time()
     answer = await agent.run("What is the capital of Japan?")
@@ -71,9 +80,8 @@ async def test_current_events_search():
     print("TEST 2 — Current events (requires live search)")
     print(SEP)
 
-    memory = HybridMemory()
     agent = FastAgent(
-        memory=memory,
+        memory=make_memory(),
         system_prompt=(
             "You are a news assistant. Always search for current information. "
             "Be concise and factual."
@@ -88,8 +96,11 @@ async def test_current_events_search():
     print(f"Time:   {duration:.1f}s")
 
     assert_not_empty(answer, "Answer is not empty")
-    assert_answer(answer, ["ai", "model", "research", "openai", "google", "anthropic"],
-                  "Answer contains AI-related keywords")
+    assert_answer(
+        answer,
+        ["ai", "model", "research", "openai", "google", "anthropic"],
+        "Answer contains AI-related keywords",
+    )
 
     await agent.cleanup()
 
@@ -100,9 +111,8 @@ async def test_multi_step_search():
     print("TEST 3 — Multi-step comparison search")
     print(SEP)
 
-    memory = HybridMemory()
     agent = FastAgent(
-        memory=memory,
+        memory=make_memory(),
         system_prompt=(
             "You are a research assistant. "
             "Search thoroughly before comparing. Show concrete numbers."
@@ -131,8 +141,8 @@ async def test_search_stores_in_memory():
     print("TEST 4 — Search results stored in memory")
     print(SEP)
 
-    memory = HybridMemory()
-    agent = FastAgent(memory=memory)
+    # Reuse the same agent/memory across both tasks
+    agent = FastAgent(memory=make_memory())
 
     # First task — search for something
     await agent.run("What company makes the iPhone?")
@@ -156,9 +166,8 @@ async def test_agent_gives_honest_answer_when_uncertain():
     print("TEST 5 — Honest answer when info is hard to find")
     print(SEP)
 
-    memory = HybridMemory()
     agent = FastAgent(
-        memory=memory,
+        memory=make_memory(),
         system_prompt=(
             "You are a precise assistant. "
             "If you cannot find reliable information, say so clearly. Never guess."
@@ -171,7 +180,6 @@ async def test_agent_gives_honest_answer_when_uncertain():
 
     print(f"Answer: {answer[:300]}")
 
-    # Should not confidently hallucinate a precise number
     assert_not_empty(answer, "Answer is not empty")
     print(f"{PASS} Agent responded without crashing")
 

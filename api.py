@@ -719,6 +719,7 @@ from functools import partial
 import httpx
 from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
+from numpy import random
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
@@ -881,8 +882,10 @@ async def _ask(agent: Any, task: str, max_steps: int = 6) -> str:
             return await agent.ask_async(task, max_steps=max_steps)
         except Exception as e:
             if "429" in str(e) and attempt < 2:
-                wait = 2 ** attempt * 3
-                log.warning(f"Groq 429 — retrying in {wait}s (attempt {attempt+1})")
+                base = 2 ** attempt * 3          # 3s, 6s
+                jitter = random.uniform(0, base)  # full jitter: 0–3s, 0–6s
+                wait = base + jitter              # total: 3–6s, 6–12s
+                log.warning(f"Groq 429 — retrying in {wait:.1f}s (attempt {attempt+1})")
                 await asyncio.sleep(wait)
             else:
                 raise
