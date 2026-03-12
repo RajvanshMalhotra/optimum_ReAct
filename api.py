@@ -1243,7 +1243,7 @@ log = logging.getLogger("gotham-api")
 app = FastAPI(
     title="Gotham Orbital — Fused Intelligence API",
     description="Palantir-style satellite movement history + live news fusion",
-    version="3.7.0",
+    version="3.8.0",
 )
 app.add_middleware(
     CORSMiddleware,
@@ -1671,7 +1671,7 @@ async def refresh_tles():
 @app.get("/health")
 async def health():
     return {
-        "status": "ok", "service": "gotham-orbital", "version": "3.7.0",
+        "status": "ok", "service": "gotham-orbital", "version": "3.8.0",
         "ts": utcnow(), "satellites": len(SAT_CATALOG), "db": DB_PATH,
         "tavily": bool(TAVILY_KEY), "groq_env": bool(os.getenv("GROQ_API_KEY")),
     }
@@ -1728,6 +1728,9 @@ async def intel_query(req: IntelQueryRequest,
             "Before searching the web, first check whether any satellites in the provided "
             "catalog (COSMOS2543, YAOGAN30, LACROSSE5, GPS001, GLONASS, TIANGONG) are "
             "relevant to the query — use their orbital data as your primary source. "
+            "IMPORTANT: You must search the web for current conflict zone locations, "
+            "recent military activity, and satellite mission details BEFORE declaring "
+            "anything [UNKNOWN]. [UNKNOWN] is only valid after a search attempt failed. "
             f"Answer this query: {req.query}"
         ),
         f"Timestamp: {utcnow()} — Current ingest cycle: {req.current_cycle}",
@@ -1823,14 +1826,24 @@ async def run_agent(req: AgentRequest,
             "never overstating certainty. You are rewarded for identifying gaps, not for "
             "producing confident-sounding conclusions from weak data.\n\n"
             "Start with [ANALYST-1] SYNTHESIS.\n\n"
+            "PRE-SYNTHESIS SEARCH CHECKLIST — complete ALL of these before writing anything:\n"
+            "  Step 1. Search for current active conflict zones with geographic coordinates\n"
+            "          in every REGION label present in the satellite snapshot.\n"
+            "  Step 2. Search for each satellite's known mission, coverage area, and recent\n"
+            "          activity by name (e.g. 'COSMOS-2543 mission', 'YAOGAN-30 ISR').\n"
+            "  Step 3. Search for latest ground/military activity in each overflown region\n"
+            "          (e.g. 'Ukraine frontline March 2026', 'Middle East military activity 2026').\n"
+            "  Step 4. Only after steps 1-3 are complete may you begin writing.\n"
+            "  [UNKNOWN] is only valid if a search was attempted and returned no result.\n"
+            "  Declaring something [UNKNOWN] without searching first is an analytical failure.\n\n"
             "STRICT OUTPUT RULES:\n"
             "  1. Tag every factual claim as [RETRIEVED], [INFERRED], or [UNKNOWN].\n"
             "  2. IF-THEN-RESULT chains may only use [RETRIEVED] or [INFERRED] claims.\n"
             "     Any chain built on [UNKNOWN] data must be marked [SPECULATIVE] and "
             "     placed in a separate SPECULATIVE section — not in the main assessment.\n"
             "  3. DATA GAPS section is mandatory. List every piece of information you "
-            "     needed but could not retrieve. A short DATA GAPS section is a red flag "
-            "     that you did not look hard enough.\n"
+            "     needed but could not retrieve AFTER searching. A claim is only [UNKNOWN] "
+            "     if you searched and found nothing — not if you didn't try.\n"
             "  4. CONFIDENCE must be justified explicitly:\n"
             "       - Below 50%  → state what retrieval would be needed to raise it.\n"
             "       - 50–75%     → name the specific uncertainty driving the range.\n"
@@ -1842,7 +1855,7 @@ async def run_agent(req: AgentRequest,
             "  SYNTHESIS         — brief 2-sentence summary of what is actually known\n"
             "  ASSESSMENT        — IF/THEN/RESULT (retrieved/inferred only)\n"
             "  SPECULATIVE       — IF/THEN/RESULT (unknown-data chains, clearly labelled)\n"
-            "  DATA GAPS         — what you could not retrieve and why it matters\n"
+            "  DATA GAPS         — what you searched for but could not retrieve\n"
             "  CONFIDENCE        — percentage + explicit justification\n"
             "  RECOMMENDATION    — specific, actionable, named\n\n"
             "MANDATORY FINAL LINE: You MUST end your response with exactly:\n"
