@@ -6,7 +6,7 @@ requests
 pydantic
 rich
 networkx
-
+sgp4
 # Search / tools
 tavily-python
 
