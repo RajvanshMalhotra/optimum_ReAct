@@ -1208,7 +1208,6 @@ KEY CHANGES IN THIS VERSION:
 #     uvicorn.run("api:app", host="0.0.0.0", port=port, reload=False, workers=1)
 
 
-
 import os
 import re
 import math
@@ -1244,7 +1243,7 @@ log = logging.getLogger("gotham-api")
 app = FastAPI(
     title="Gotham Orbital — Fused Intelligence API",
     description="Palantir-style satellite movement history + live news fusion",
-    version="3.6.0",
+    version="3.7.0",
 )
 app.add_middleware(
     CORSMiddleware,
@@ -1672,7 +1671,7 @@ async def refresh_tles():
 @app.get("/health")
 async def health():
     return {
-        "status": "ok", "service": "gotham-orbital", "version": "3.6.0",
+        "status": "ok", "service": "gotham-orbital", "version": "3.7.0",
         "ts": utcnow(), "satellites": len(SAT_CATALOG), "db": DB_PATH,
         "tavily": bool(TAVILY_KEY), "groq_env": bool(os.getenv("GROQ_API_KEY")),
     }
@@ -1713,9 +1712,10 @@ async def intel_query(req: IntelQueryRequest,
 
     current_pos = ""
     if req.satellite_snapshot:
-        lines = [l for l in req.satellite_snapshot.splitlines() if any(s in l for s in sat_ids)]
+        enriched_snap = enrich_snapshot(req.satellite_snapshot)
+        lines = [l for l in enriched_snap.splitlines() if any(s in l for s in sat_ids)]
         if lines:
-            current_pos = "Current SGP4 positions:\n" + "\n".join(lines)
+            current_pos = "Current SGP4 positions (with resolved regions):\n" + "\n".join(lines)
 
     proximity_block = ("Proximity alerts:\n" + "\n".join(proximity_alerts)) if proximity_alerts else ""
 
@@ -1771,6 +1771,31 @@ async def intel_query(req: IntelQueryRequest,
         ts=utcnow(),
     )
 
+def enrich_snapshot(snapshot_text: str) -> str:
+    """
+    Parse a raw snapshot and re-emit each line with the ground_region label injected,
+    so the agent doesn't have to infer geography from raw lat/lon.
+    Lines that don't match the pattern are passed through unchanged.
+    """
+    pattern = re.compile(
+        r"(?P<id>[A-Z0-9]+)\([^)]+\):\s*"
+        r"lat=(?P<lat>-?\d+\.?\d*)\s+"
+        r"lon=(?P<lon>-?\d+\.?\d*)\s+"
+        r"alt=(?P<alt>\d+\.?\d*)km"
+    )
+    enriched = []
+    for line in snapshot_text.splitlines():
+        m = pattern.match(line.strip())
+        if m:
+            lat  = float(m.group("lat"))
+            lon  = float(m.group("lon"))
+            region = ground_region(lat, lon)
+            enriched.append(f"{line.strip()} → REGION: {region}")
+        else:
+            enriched.append(line)
+    return "\n".join(enriched)
+
+
 @app.post("/agent", response_model=AgentResponse)
 async def run_agent(req: AgentRequest,
                     x_groq_key:   str = Header(default=""),
@@ -1819,8 +1844,13 @@ async def run_agent(req: AgentRequest,
             "  SPECULATIVE       — IF/THEN/RESULT (unknown-data chains, clearly labelled)\n"
             "  DATA GAPS         — what you could not retrieve and why it matters\n"
             "  CONFIDENCE        — percentage + explicit justification\n"
-            "  RECOMMENDATION    — specific, actionable, named"
-            "Before searching the web, first check whether any satellites in the provided catalog  are relevant to the query."
+            "  RECOMMENDATION    — specific, actionable, named\n\n"
+            "MANDATORY FINAL LINE: You MUST end your response with exactly:\n"
+            "RELEVANT OBJECTS: [comma-separated IDs from this list only: "
+            "ISS, TIANGONG, NOAA19, TERRA, AQUA, SENTINEL2B, STARLINK30, STARLINK31, "
+            "IRIDIUM140, GPS001, GLONASS, COSMOS2543, YAOGAN30, LACROSSE5]\n"
+            "Include every satellite ID mentioned anywhere in your response. "
+            "Do not omit this line."
         ),
     }
 
@@ -1828,7 +1858,9 @@ async def run_agent(req: AgentRequest,
     if role not in ROLE_TASK:
         raise HTTPException(400, f"Unknown role '{role}'. Use: orbital | news | analyst")
 
-    snap = f"Satellite positions ({utcnow()}):\n{req.satellite_snapshot}\n\n" if req.satellite_snapshot else ""
+    # Enrich snapshot with resolved region labels before passing to agent
+    enriched = enrich_snapshot(req.satellite_snapshot) if req.satellite_snapshot else ""
+    snap = f"Satellite positions ({utcnow()}):\n{enriched}\n\n" if enriched else ""
     full_task = f"{snap}{req.user_message}\n\nTask: {ROLE_TASK[role]}"
 
     try:
