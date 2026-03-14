@@ -1,0 +1,73 @@
+name: Deploy to EC2
+
+on:
+  push:
+    branches: 
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Deploy to EC2
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          timeout: 300s
+          script: |
+            set -e
+            cd ~/optimum_ReAct
+
+            echo "── Pulling latest code ──"
+            git pull origin main
+
+            echo "── Building new Docker image ──"
+            docker build --no-cache -t agentic-app:latest .
+
+            echo "── Stopping old container ──"
+            docker rm -f agentic_container || true
+
+            echo "── Starting new container ──"
+            docker run -d \
+              -p 8080:8000 \
+              --name agentic_container \
+              --restart unless-stopped \
+              --env-file .env \
+              -v $(pwd)/data:/app/data \
+              agentic-app:latest
+
+            echo "── Waiting for health check ──"
+            for i in $(seq 1 12); do
+              STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/health || echo "000")
+              if [ "$STATUS" = "200" ]; then
+                echo "✓ Health check passed (attempt $i)"
+                exit 0
+              fi
+              echo "  attempt $i — got $STATUS, retrying in 5s..."
+              sleep 5
+            done
+
+            echo "✗ Health check failed after 60s — rolling back"
+            docker rm -f agentic_container || true
+            docker run -d \
+              -p 8080:8000 \
+              --name agentic_container \
+              --restart unless-stopped \
+              --env-file .env \
+              -v $(pwd)/data:/app/data \
+              agentic-app:previous || echo "No previous image to roll back to"
+            exit 1
+
+      - name: Notify success
+        if: success()
+        run: echo "✓ Deployed successfully to ${{ secrets.EC2_HOST }}:8080"
+
+      - name: Notify failure
+        if: failure()
+        run: echo "✗ Deployment failed — check EC2 logs"
