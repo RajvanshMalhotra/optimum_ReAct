@@ -1960,7 +1960,13 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 
 load_dotenv()
-
+http_client = httpx.AsyncClient(
+    timeout=httpx.Timeout(10.0),
+    limits=httpx.Limits(
+        max_connections=50,
+        max_keepalive_connections=20
+    )
+)
 # EZAgent is imported INSIDE get_agent() after env vars are set — Docker fix.
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)s  %(message)s")
@@ -2009,14 +2015,14 @@ TLE_TTL_HOURS = 6
 async def fetch_tle_celestrak(norad_id: int):
     url = f"https://celestrak.org/NORAD/elements/gp.php?CATNR={norad_id}&FORMAT=TLE"
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            r = await client.get(url)
-            r.raise_for_status()
-            lines = [l.strip() for l in r.text.strip().splitlines() if l.strip()]
-            if len(lines) >= 3:
-                return lines[1], lines[2]
-            elif len(lines) == 2 and lines[0].startswith("1 "):
-                return lines[0], lines[1]
+        # async with httpx.AsyncClient(timeout=10.0) as client:
+        r = await http_client.get(url)
+        r.raise_for_status()
+        lines = [l.strip() for l in r.text.strip().splitlines() if l.strip()]
+        if len(lines) >= 3:
+            return lines[1], lines[2]
+        elif len(lines) == 2 and lines[0].startswith("1 "):
+            return lines[0], lines[1]
     except Exception as e:
         log.warning(f"Celestrak fetch failed for {norad_id}: {e}")
     return None
@@ -2669,4 +2675,8 @@ async def clear_memory():
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", 8000))
-    uvicorn.run("api:app", host="0.0.0.0", port=port, reload=False, workers=1)
+    uvicorn.run("api:app", host="0.0.0.0", port=port, reload=False, workers=4)
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    await http_client.aclose()
