@@ -2680,3 +2680,6 @@ if __name__ == "__main__":
 @app.on_event("shutdown")
 async def shutdown_event():
     await http_client.aclose()
+
+
+    
