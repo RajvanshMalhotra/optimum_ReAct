@@ -48,9 +48,10 @@ log = logging.getLogger("gotham-api")
 app = FastAPI(title="Gotham Orbital — Fused Intelligence API", version="4.1.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["GET", "POST", "DELETE"],
+    allow_origins=["*","https://gotham-i1npybsp5-rajvanshmalhotras-projects.vercel.app/"],
+    allow_methods=["*"],       # covers GET, POST, DELETE, OPTIONS, PATCH etc.
     allow_headers=["*"],
+    expose_headers=["*"],      # lets frontend read custom response headers
 )
 
 http_client = httpx.AsyncClient(
