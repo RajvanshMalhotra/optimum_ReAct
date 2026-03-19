@@ -132,7 +132,7 @@ _agents_lock  = asyncio.Lock()
 async def get_agent(
     groq_key:   str = "",
     tavily_key: str = "",
-    model:      str = "",
+    model:      str = "moonshotai/kimi-k2-instruct-0905",
     role:       str = "atlas",
 ) -> Any:
     global _agents
