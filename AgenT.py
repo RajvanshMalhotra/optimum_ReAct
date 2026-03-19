@@ -325,61 +325,74 @@
 
 
 """
-EZ Agent - Simple interface for using your ReAct agent.
+EZ Agent — simple interface for your ReAct agent.
 
 Usage:
     from AgenT import EZAgent
 
-    # Use default model (from config.py / LLM_MODEL env var)
+    # Default model (from config.py / LLM_MODEL env var)
     agent = EZAgent()
 
-    # Explicitly set model
-    agent = EZAgent(model="llama-3.3-70b-versatile")
-    agent = EZAgent(model="llama-3.1-8b-instant")
+    # Explicit model + system prompt
+    agent = EZAgent(
+        model="llama-3.3-70b-versatile",
+        system_prompt="You are ATLAS, a satellite intelligence analyst.",
+    )
 
     result = agent.ask("What is 15 * 23?")
-    print(result)
 """
 
 import asyncio
-from pathlib import Path
 from memory.hybrid import HybridMemory
 from core.agent import FastAgent
 
 
 class EZAgent:
-    """Easy-to-use agent interface."""
+    """Easy-to-use agent interface wrapping IntelligentAgent."""
 
-    def __init__(self, memory_path: str = "agent_memory.db", model: str = ""):
+    def __init__(
+        self,
+        memory_path:   str       = "agent_memory.db",
+        model:         str       = "",
+        system_prompt: str | None = None,
+        tools:         list | None = None,
+    ):
         """
-        Initialize the agent.
-
         Args:
-            memory_path: Path to SQLite database for persistent memory
-            model:       Groq model ID to use. Empty string = use global default
-                         from config.py / LLM_MODEL env var.
-                         Examples:
-                           "llama-3.1-8b-instant"     ← recommended (131k tok/min)
-                           "llama-3.3-70b-versatile"  ← best quality (12k tok/min)
-                           "gemma2-9b-it"             ← balanced (15k tok/min)
+            memory_path:   Path to SQLite database for persistent memory.
+            model:         Groq model ID.  Empty = use LLM_MODEL from config.
+                           Examples:
+                             "llama-3.1-8b-instant"    (131k tok/min — recommended)
+                             "llama-3.3-70b-versatile" (12k tok/min — highest quality)
+                             "gemma2-9b-it"            (15k tok/min — balanced)
+            system_prompt: Persona / role instruction injected at every reasoning step.
+                           Leave empty for the default general-purpose agent.
+            tools:         List of tool dicts to expose to the agent.
+                           Defaults to [web_search].
         """
         self.memory = HybridMemory(memory_path)
-        self.agent  = FastAgent(self.memory, model=model)
+        self.agent  = FastAgent(
+            self.memory,
+            system_prompt=system_prompt,
+            tools=tools,
+            model=model,
+        )
         self.model  = self.agent.model   # expose resolved model name
 
+    # ------------------------------------------------------------------
+    # Ask interface
     # ------------------------------------------------------------------
 
     def ask(self, task: str, max_steps: int = 10) -> str:
         """Ask the agent to perform a task (synchronous)."""
-        return asyncio.run(self._async_ask(task, max_steps))
-
-    async def _async_ask(self, task: str, max_steps: int) -> str:
-        return await self.agent.run(task, max_steps=max_steps)
+        return asyncio.run(self.ask_async(task, max_steps))
 
     async def ask_async(self, task: str, max_steps: int = 10) -> str:
         """Ask the agent to perform a task (async)."""
         return await self.agent.run(task, max_steps=max_steps)
 
+    # ------------------------------------------------------------------
+    # Memory helpers
     # ------------------------------------------------------------------
 
     def remember(self, fact: str, importance: float = 0.8) -> str:
@@ -394,7 +407,12 @@ class EZAgent:
 
     def clear_session(self):
         self.memory = HybridMemory(self.memory.store.db_path)
-        self.agent  = FastAgent(self.memory, model=self.model)
+        self.agent  = FastAgent(
+            self.memory,
+            system_prompt=self.agent.system_prompt,
+            tools=self.agent.tools,
+            model=self.model,
+        )
 
     async def cleanup(self):
         await self.agent.cleanup()
