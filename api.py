@@ -27,6 +27,7 @@ import logging
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Any
 from functools import partial
+from fastapi.middleware.cors import CORSMiddleware
 
 try:
     from sgp4.api import Satrec, jday
@@ -46,12 +47,13 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)s  %(me
 log = logging.getLogger("gotham-api")
 
 app = FastAPI(title="Gotham Orbital — Fused Intelligence API", version="4.1.0")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*","https://gotham-i1npybsp5-rajvanshmalhotras-projects.vercel.app/"],
-    allow_methods=["*"],       # covers GET, POST, DELETE, OPTIONS, PATCH etc.
+    allow_origins=["*"],  # for testing
+    allow_credentials=True,
+    allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["*"],      # lets frontend read custom response headers
 )
 
 http_client = httpx.AsyncClient(
