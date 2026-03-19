@@ -1421,7 +1421,391 @@ from config import AGENT_MAX_STEPS
 # AutonomousAgent = IntelligentAgent
 
 # v4 
-"""Intelligent agent — v4 with bug fixes."""
+# """Intelligent agent — v4 with bug fixes."""
+# import time
+# import json
+# import re
+# import asyncio
+# from typing import List, Optional
+# from models.agent import AgentThought, ToolResult
+# from memory.hybrid import HybridMemory
+# from core.llm import llm_client
+# from tools.registry import tool_registry
+# from config import AGENT_MAX_STEPS
+
+
+# class IntelligentAgent:
+#     """Agent that trusts LLM intelligence instead of micromanaging with rules."""
+
+#     DEFAULT_TOOLS = [
+#         {"name": "web_search", "description": "Search the internet for current information"},
+#     ]
+
+#     def __init__(
+#         self,
+#         memory: HybridMemory,
+#         system_prompt: str | None = None,
+#         tools: list[dict] | None = None,
+#     ):
+#         self.memory = memory
+#         self.llm = llm_client
+#         self.conversation_history: list[dict] = []
+
+#         self.system_prompt = system_prompt or (
+#             "You are an intelligent AI agent. "
+#             "Think step by step and use the available tools wisely to complete the task."
+#         )
+#         self.tools = tools or self.DEFAULT_TOOLS
+
+#     # ------------------------------------------------------------------
+#     # Helpers
+#     # ------------------------------------------------------------------
+
+#     def _format_tools(self) -> str:
+#         return "\n".join(f"- {t['name']}: {t['description']}" for t in self.tools)
+
+#     # ------------------------------------------------------------------
+#     # Agent internals
+#     # ------------------------------------------------------------------
+
+#     async def _ask_user(self, question: str) -> str:
+#         try:
+#             answer = input(f"\033[93m{question}\033[0m ")
+#         except (EOFError, KeyboardInterrupt):
+#             answer = "not specified"
+#         self.memory.remember(
+#             f"Q: {question} | A: {answer}",
+#             mem_type="preference",
+#             importance=0.9,
+#         )
+#         return answer
+
+#     def _remember(self, content: str) -> str:
+#         mem_id = self.memory.remember(content, mem_type="fact", importance=0.8)
+#         return f"Stored as {mem_id}"
+
+#     def _recall(self, query: str) -> str:
+#         return self.memory.recall_context(query, max_tokens=500)
+
+#     # ------------------------------------------------------------------
+#     # Tool execution
+#     # ------------------------------------------------------------------
+
+#     async def _execute_tool(self, tool_name: str, query: str) -> ToolResult:
+#         print(f"\033[94m🔧 {tool_name}\033[0m")
+
+#         if not tool_registry.has_tool(tool_name):
+#             return ToolResult(
+#                 tool=tool_name, success=False, data=None, error="Tool unavailable"
+#             )
+
+#         try:
+#             tool = tool_registry.get_tool(tool_name)
+#             result = await tool.execute(query)
+
+#             if result.success and tool_name == "web_search":
+#                 summary = f"Search: {query}\nResults:\n{str(result.data)}"
+#                 self.memory.remember(summary, mem_type="tool_output", importance=0.95)
+#                 print(f"  ✓ Stored search results ({len(str(result.data))} chars)")
+
+#             return result
+
+#         except Exception as e:
+#             return ToolResult(tool=tool_name, success=False, data=None, error=str(e))
+
+#     # ------------------------------------------------------------------
+#     # Context building
+#     # ------------------------------------------------------------------
+
+#     def _recent_history_text(self) -> str:
+#         """Return a compact, plain-text summary of recent turns."""
+#         if not self.conversation_history:
+#             return ""
+#         lines = []
+#         for turn in self.conversation_history[-3:]:
+#             lines.append(f"User: {turn['user']}")
+#             # Keep assistant snippet short so it doesn't pollute FTS queries
+#             lines.append(f"Assistant: {turn['assistant'][:120]}...")
+#         return "\n".join(lines)
+
+#     def _recall_query(self, task: str) -> str:
+#         """
+#         Build a SHORT, clean string to pass to recall_context / FTS.
+#         We use only the task text — NOT the full conversation history,
+#         because that would produce enormous, garbage FTS queries.
+#         """
+#         return task  # Keep it simple and clean
+
+#     # ------------------------------------------------------------------
+#     # Core reasoning
+#     # ------------------------------------------------------------------
+
+#     async def _think_intelligently(
+#         self, task: str, previous_thoughts: List[AgentThought]
+#     ) -> AgentThought:
+
+#         # Use clean task-only string for memory recall
+#         memory_context = self.memory.recall_context(
+#             self._recall_query(task), max_tokens=600
+#         )
+
+#         recent_thoughts = (
+#             previous_thoughts[-3:] if len(previous_thoughts) > 3 else previous_thoughts
+#         )
+#         thought_context = "\n".join([
+#             f"Step {t.step}: {t.action} - "
+#             f"{t.observation[:150] if t.observation else 'pending'}..."
+#             for t in recent_thoughts
+#         ])
+
+#         history_text = self._recent_history_text()
+
+#         prompt = f"""{self.system_prompt}
+
+# TASK: {task}
+
+# {f"RECENT CONVERSATION:{chr(10)}{history_text}{chr(10)}" if history_text else ""}
+# AVAILABLE INFORMATION:
+# {memory_context if memory_context else "No stored information relevant to this task"}
+
+# WHAT YOU'VE DONE SO FAR:
+# {thought_context if thought_context else "This is your first step"}
+
+# AVAILABLE TOOLS:
+# {self._format_tools()}
+
+# AGENT ACTIONS (always available, not tools):
+# - ask_user: Ask the user a clarifying question
+# - remember: Store a fact for later
+# - recall: Retrieve stored information
+# - final_answer: Deliver your answer and stop
+
+# THINK STEP BY STEP:
+# 1. Do I have enough RELEVANT information to answer this task?
+# 2. If not, should I search the web?
+# 3. What is the most logical next action?
+
+# Respond with a single JSON object and nothing else:
+# {{"reasoning": "your thinking", "action": "chosen_action", "query": "query if needed", "complete": true/false}}"""
+
+#         response = await self.llm.simple_prompt(prompt, max_tokens=800)
+
+#         data = self._parse_json(response)
+
+#         if data:
+#             thought = AgentThought(
+#                 step=len(previous_thoughts) + 1,
+#                 reasoning=data.get("reasoning", "")[:200],
+#                 action=data.get("action", "final_answer"),
+#                 query=str(data.get("query") or ""),
+#                 complete=bool(data.get("complete", False)),
+#             )
+#             thought.memory_id = self.memory.remember(
+#                 f"Step {thought.step}: {thought.reasoning} → {thought.action}",
+#                 mem_type="thought",
+#                 importance=0.5,
+#             )
+#             return thought
+
+#         # Fallback: default to web_search so the agent can still make progress
+#         return AgentThought(
+#             step=len(previous_thoughts) + 1,
+#             reasoning="JSON parsing failed — defaulting to web_search",
+#             action="web_search",
+#             query=task,
+#             complete=False,
+#         )
+
+#     @staticmethod
+#     def _parse_json(response: str) -> Optional[dict]:
+#         """Try several strategies to extract JSON from LLM output."""
+#         # 1. Direct parse
+#         try:
+#             return json.loads(response.strip())
+#         except json.JSONDecodeError:
+#             pass
+
+#         # 2. Strip markdown fences
+#         try:
+#             clean = re.sub(r'```(?:json)?\s*|\s*```', '', response)
+#             return json.loads(clean.strip())
+#         except json.JSONDecodeError:
+#             pass
+
+#         # 3. Extract first {...} block
+#         try:
+#             match = re.search(r'\{.*?\}', response, re.DOTALL)
+#             if match:
+#                 return json.loads(match.group(0))
+#         except json.JSONDecodeError:
+#             pass
+
+#         # 4. Try fixing unquoted keys inside first {...} block
+#         try:
+#             match = re.search(r'\{.*?\}', response, re.DOTALL)
+#             if match:
+#                 json_str = match.group(0)
+#                 json_str = re.sub(r'(?<!["\w])(\w+)\s*:', r'"\1":', json_str)
+#                 json_str = json_str.replace("'", '"')
+#                 return json.loads(json_str)
+#         except (json.JSONDecodeError, AttributeError):
+#             pass
+
+#         # 5. Manually recover "action" field
+#         try:
+#             action_match = re.search(
+#                 r'["\']?action["\']?\s*:\s*["\'](\w+)["\']', response, re.IGNORECASE
+#             )
+#             if action_match:
+#                 print(f"  ⚠️  Recovered action: {action_match.group(1)}")
+#                 return {
+#                     "reasoning": "Recovered from malformed JSON",
+#                     "action": action_match.group(1),
+#                     "query": "",
+#                     "complete": False,
+#                 }
+#         except Exception:
+#             pass
+
+#         return None
+
+#     # ------------------------------------------------------------------
+#     # Main run loop
+#     # ------------------------------------------------------------------
+
+#     async def run(self, task: str, max_steps: int = AGENT_MAX_STEPS) -> str:
+#         print(f"\033[96m🤖 Intelligent Agent running...\033[0m\n")
+
+#         self.memory.load_past_session_context(task)
+
+#         thoughts: List[AgentThought] = []
+#         start_time = time.time()
+
+#         for step in range(max_steps):
+#             print(f"\033[96m💭 Step {step + 1}\033[0m")
+
+#             thought = await self._think_intelligently(task, thoughts)
+
+#             print(f"\033[2m{thought.reasoning[:150]}\033[0m")
+#             print(f"\033[92m→ {thought.action}\033[0m")
+
+#             # Agent internals
+#             if thought.action == "final_answer":
+#                 recent_searches = [
+#                     t.observation for t in thoughts
+#                     if t.action == "web_search" and t.observation
+#                 ]
+
+#                 if recent_searches:
+#                     search_data = "\n\n=== NEXT RESULT ===\n\n".join(recent_searches[-3:])
+#                     final_prompt = (
+#                         f"Task: {task}\n\n"
+#                         f"Search results:\n{search_data[:4000]}\n\n"
+#                         f"Provide a helpful, specific answer using the search results. "
+#                         f"Include concrete details.\n\nAnswer:"
+#                     )
+#                     print(f"\n\033[93m📊 Using {len(recent_searches)} search results\033[0m")
+#                 else:
+#                     memory_context = self.memory.recall_context(task, max_tokens=800)
+#                     final_prompt = (
+#                         f"Task: {task}\n\n"
+#                         f"Available information:\n{memory_context}\n\n"
+#                         f"Provide a helpful answer.\n\nAnswer:"
+#                     )
+#                     print(f"\n\033[93m📚 Using memory context\033[0m")
+
+#                 final_answer = await self.llm.simple_prompt(final_prompt, max_tokens=1000)
+
+#                 duration = time.time() - start_time
+#                 self.memory.save_session(task, final_answer, duration)
+#                 self.conversation_history.append(
+#                     {"user": task, "assistant": final_answer}
+#                 )
+#                 return final_answer
+
+#             elif thought.action == "ask_user":
+#                 thought.observation = await self._ask_user(thought.query)
+
+#             elif thought.action == "remember":
+#                 thought.observation = self._remember(thought.query)
+
+#             elif thought.action == "recall":
+#                 thought.observation = self._recall(thought.query)
+
+#             else:
+#                 # External tool
+#                 result = await self._execute_tool(thought.action, thought.query)
+#                 thought.observation = (
+#                     str(result.data) if result.success else f"Error: {result.error}"
+#                 )
+
+#                 if thought.action == "web_search":
+#                     recent_search_count = sum(
+#                         1 for t in thoughts[-4:] if t.action == "web_search"
+#                     )
+#                     if recent_search_count >= 3:
+#                         print(
+#                             "  \033[93m⚠️  Multiple searches completed"
+#                             " - moving to answer\033[0m"
+#                         )
+#                         thought.complete = True
+
+#             if thought.memory_id and thoughts and thoughts[-1].memory_id:
+#                 self.memory.relate(
+#                     thoughts[-1].memory_id, thought.memory_id, weight=1.0
+#                 )
+
+#             thoughts.append(thought)
+
+#             if thought.complete:
+#                 break
+
+#         # Max steps reached
+#         recent_searches = [
+#             t.observation for t in thoughts
+#             if t.action == "web_search" and t.observation
+#         ]
+
+#         if recent_searches:
+#             search_data = "\n\n".join(recent_searches[-2:])
+#             final_prompt = (
+#                 f"Task: {task}\n\nSearch results:\n{search_data[:3000]}"
+#                 f"\n\nProvide a brief answer:"
+#             )
+#         else:
+#             memory_context = self.memory.recall_context(task, max_tokens=800)
+#             final_prompt = f"Task: {task}\nInfo: {memory_context}\n\nProvide a brief answer:"
+
+#         final_answer = await self.llm.simple_prompt(final_prompt, max_tokens=800)
+
+#         duration = time.time() - start_time
+#         self.memory.save_session(task, final_answer, duration)
+#         self.conversation_history.append({"user": task, "assistant": final_answer})
+
+#         return final_answer
+
+#     # ------------------------------------------------------------------
+#     # Cleanup — does NOT permanently destroy the shared LLM client
+#     # ------------------------------------------------------------------
+
+#     async def cleanup(self):
+#         """
+#         Release resources for this agent.
+
+#         We deliberately do NOT call self.llm.close() here because llm_client
+#         is a global singleton shared across all agents in the process.
+#         Closing it in one agent would break subsequent agents/tests.
+#         """
+#         pass  # Nothing per-agent to clean up right now
+
+
+# # Aliases
+# FastAgent = IntelligentAgent
+
+
+# v5
+
+"""Intelligent agent v4 — explicit per-instance model support."""
 import time
 import json
 import re
@@ -1435,7 +1819,16 @@ from config import AGENT_MAX_STEPS
 
 
 class IntelligentAgent:
-    """Agent that trusts LLM intelligence instead of micromanaging with rules."""
+    """
+    Agent that carries its own model ID.
+
+    The model can be set at construction time:
+        agent = IntelligentAgent(memory, model="llama-3.3-70b-versatile")
+
+    Every LLM call inside the agent passes model=self.model, so multiple
+    agent instances with different models coexist safely without stomping
+    on the global llm_client.model.
+    """
 
     DEFAULT_TOOLS = [
         {"name": "web_search", "description": "Search the internet for current information"},
@@ -1446,9 +1839,12 @@ class IntelligentAgent:
         memory: HybridMemory,
         system_prompt: str | None = None,
         tools: list[dict] | None = None,
+        model: str = "",
     ):
         self.memory = memory
-        self.llm = llm_client
+        self.llm    = llm_client
+        # Resolve model: explicit arg → global client default → config default
+        self.model  = model.strip() if model.strip() else llm_client.model
         self.conversation_history: list[dict] = []
 
         self.system_prompt = system_prompt or (
@@ -1465,7 +1861,7 @@ class IntelligentAgent:
         return "\n".join(f"- {t['name']}: {t['description']}" for t in self.tools)
 
     # ------------------------------------------------------------------
-    # Agent internals
+    # Tool execution
     # ------------------------------------------------------------------
 
     async def _ask_user(self, question: str) -> str:
@@ -1487,20 +1883,14 @@ class IntelligentAgent:
     def _recall(self, query: str) -> str:
         return self.memory.recall_context(query, max_tokens=500)
 
-    # ------------------------------------------------------------------
-    # Tool execution
-    # ------------------------------------------------------------------
-
     async def _execute_tool(self, tool_name: str, query: str) -> ToolResult:
         print(f"\033[94m🔧 {tool_name}\033[0m")
 
         if not tool_registry.has_tool(tool_name):
-            return ToolResult(
-                tool=tool_name, success=False, data=None, error="Tool unavailable"
-            )
+            return ToolResult(tool=tool_name, success=False, data=None, error="Tool unavailable")
 
         try:
-            tool = tool_registry.get_tool(tool_name)
+            tool   = tool_registry.get_tool(tool_name)
             result = await tool.execute(query)
 
             if result.success and tool_name == "web_search":
@@ -1514,40 +1904,27 @@ class IntelligentAgent:
             return ToolResult(tool=tool_name, success=False, data=None, error=str(e))
 
     # ------------------------------------------------------------------
-    # Context building
+    # Context
     # ------------------------------------------------------------------
 
     def _recent_history_text(self) -> str:
-        """Return a compact, plain-text summary of recent turns."""
         if not self.conversation_history:
             return ""
         lines = []
         for turn in self.conversation_history[-3:]:
             lines.append(f"User: {turn['user']}")
-            # Keep assistant snippet short so it doesn't pollute FTS queries
             lines.append(f"Assistant: {turn['assistant'][:120]}...")
         return "\n".join(lines)
 
-    def _recall_query(self, task: str) -> str:
-        """
-        Build a SHORT, clean string to pass to recall_context / FTS.
-        We use only the task text — NOT the full conversation history,
-        because that would produce enormous, garbage FTS queries.
-        """
-        return task  # Keep it simple and clean
-
     # ------------------------------------------------------------------
-    # Core reasoning
+    # Core reasoning  — all LLM calls pass model=self.model
     # ------------------------------------------------------------------
 
     async def _think_intelligently(
         self, task: str, previous_thoughts: List[AgentThought]
     ) -> AgentThought:
 
-        # Use clean task-only string for memory recall
-        memory_context = self.memory.recall_context(
-            self._recall_query(task), max_tokens=600
-        )
+        memory_context = self.memory.recall_context(task, max_tokens=600)
 
         recent_thoughts = (
             previous_thoughts[-3:] if len(previous_thoughts) > 3 else previous_thoughts
@@ -1588,7 +1965,8 @@ THINK STEP BY STEP:
 Respond with a single JSON object and nothing else:
 {{"reasoning": "your thinking", "action": "chosen_action", "query": "query if needed", "complete": true/false}}"""
 
-        response = await self.llm.simple_prompt(prompt, max_tokens=800)
+        # ← model=self.model ensures this instance uses its own model
+        response = await self.llm.simple_prompt(prompt, max_tokens=800, model=self.model)
 
         data = self._parse_json(response)
 
@@ -1607,7 +1985,6 @@ Respond with a single JSON object and nothing else:
             )
             return thought
 
-        # Fallback: default to web_search so the agent can still make progress
         return AgentThought(
             step=len(previous_thoughts) + 1,
             reasoning="JSON parsing failed — defaulting to web_search",
@@ -1618,20 +1995,17 @@ Respond with a single JSON object and nothing else:
 
     @staticmethod
     def _parse_json(response: str) -> Optional[dict]:
-        """Try several strategies to extract JSON from LLM output."""
         # 1. Direct parse
         try:
             return json.loads(response.strip())
         except json.JSONDecodeError:
             pass
-
         # 2. Strip markdown fences
         try:
             clean = re.sub(r'```(?:json)?\s*|\s*```', '', response)
             return json.loads(clean.strip())
         except json.JSONDecodeError:
             pass
-
         # 3. Extract first {...} block
         try:
             match = re.search(r'\{.*?\}', response, re.DOTALL)
@@ -1639,8 +2013,7 @@ Respond with a single JSON object and nothing else:
                 return json.loads(match.group(0))
         except json.JSONDecodeError:
             pass
-
-        # 4. Try fixing unquoted keys inside first {...} block
+        # 4. Fix unquoted keys
         try:
             match = re.search(r'\{.*?\}', response, re.DOTALL)
             if match:
@@ -1650,8 +2023,7 @@ Respond with a single JSON object and nothing else:
                 return json.loads(json_str)
         except (json.JSONDecodeError, AttributeError):
             pass
-
-        # 5. Manually recover "action" field
+        # 5. Recover action field only
         try:
             action_match = re.search(
                 r'["\']?action["\']?\s*:\s*["\'](\w+)["\']', response, re.IGNORECASE
@@ -1660,13 +2032,12 @@ Respond with a single JSON object and nothing else:
                 print(f"  ⚠️  Recovered action: {action_match.group(1)}")
                 return {
                     "reasoning": "Recovered from malformed JSON",
-                    "action": action_match.group(1),
-                    "query": "",
-                    "complete": False,
+                    "action":    action_match.group(1),
+                    "query":     "",
+                    "complete":  False,
                 }
         except Exception:
             pass
-
         return None
 
     # ------------------------------------------------------------------
@@ -1674,7 +2045,7 @@ Respond with a single JSON object and nothing else:
     # ------------------------------------------------------------------
 
     async def run(self, task: str, max_steps: int = AGENT_MAX_STEPS) -> str:
-        print(f"\033[96m🤖 Intelligent Agent running...\033[0m\n")
+        print(f"\033[96m🤖 Intelligent Agent running [{self.model}]...\033[0m\n")
 
         self.memory.load_past_session_context(task)
 
@@ -1689,7 +2060,6 @@ Respond with a single JSON object and nothing else:
             print(f"\033[2m{thought.reasoning[:150]}\033[0m")
             print(f"\033[92m→ {thought.action}\033[0m")
 
-            # Agent internals
             if thought.action == "final_answer":
                 recent_searches = [
                     t.observation for t in thoughts
@@ -1697,7 +2067,7 @@ Respond with a single JSON object and nothing else:
                 ]
 
                 if recent_searches:
-                    search_data = "\n\n=== NEXT RESULT ===\n\n".join(recent_searches[-3:])
+                    search_data  = "\n\n=== NEXT RESULT ===\n\n".join(recent_searches[-3:])
                     final_prompt = (
                         f"Task: {task}\n\n"
                         f"Search results:\n{search_data[:4000]}\n\n"
@@ -1707,53 +2077,44 @@ Respond with a single JSON object and nothing else:
                     print(f"\n\033[93m📊 Using {len(recent_searches)} search results\033[0m")
                 else:
                     memory_context = self.memory.recall_context(task, max_tokens=800)
-                    final_prompt = (
+                    final_prompt   = (
                         f"Task: {task}\n\n"
                         f"Available information:\n{memory_context}\n\n"
                         f"Provide a helpful answer.\n\nAnswer:"
                     )
                     print(f"\n\033[93m📚 Using memory context\033[0m")
 
-                final_answer = await self.llm.simple_prompt(final_prompt, max_tokens=1000)
+                # ← model=self.model
+                final_answer = await self.llm.simple_prompt(
+                    final_prompt, max_tokens=1000, model=self.model
+                )
 
                 duration = time.time() - start_time
                 self.memory.save_session(task, final_answer, duration)
-                self.conversation_history.append(
-                    {"user": task, "assistant": final_answer}
-                )
+                self.conversation_history.append({"user": task, "assistant": final_answer})
                 return final_answer
 
             elif thought.action == "ask_user":
                 thought.observation = await self._ask_user(thought.query)
-
             elif thought.action == "remember":
                 thought.observation = self._remember(thought.query)
-
             elif thought.action == "recall":
                 thought.observation = self._recall(thought.query)
-
             else:
-                # External tool
                 result = await self._execute_tool(thought.action, thought.query)
                 thought.observation = (
                     str(result.data) if result.success else f"Error: {result.error}"
                 )
-
                 if thought.action == "web_search":
                     recent_search_count = sum(
                         1 for t in thoughts[-4:] if t.action == "web_search"
                     )
                     if recent_search_count >= 3:
-                        print(
-                            "  \033[93m⚠️  Multiple searches completed"
-                            " - moving to answer\033[0m"
-                        )
+                        print("  \033[93m⚠️  Multiple searches — moving to answer\033[0m")
                         thought.complete = True
 
             if thought.memory_id and thoughts and thoughts[-1].memory_id:
-                self.memory.relate(
-                    thoughts[-1].memory_id, thought.memory_id, weight=1.0
-                )
+                self.memory.relate(thoughts[-1].memory_id, thought.memory_id, weight=1.0)
 
             thoughts.append(thought)
 
@@ -1765,38 +2126,28 @@ Respond with a single JSON object and nothing else:
             t.observation for t in thoughts
             if t.action == "web_search" and t.observation
         ]
-
         if recent_searches:
-            search_data = "\n\n".join(recent_searches[-2:])
+            search_data  = "\n\n".join(recent_searches[-2:])
             final_prompt = (
                 f"Task: {task}\n\nSearch results:\n{search_data[:3000]}"
                 f"\n\nProvide a brief answer:"
             )
         else:
             memory_context = self.memory.recall_context(task, max_tokens=800)
-            final_prompt = f"Task: {task}\nInfo: {memory_context}\n\nProvide a brief answer:"
+            final_prompt   = f"Task: {task}\nInfo: {memory_context}\n\nProvide a brief answer:"
 
-        final_answer = await self.llm.simple_prompt(final_prompt, max_tokens=800)
+        # ← model=self.model
+        final_answer = await self.llm.simple_prompt(
+            final_prompt, max_tokens=800, model=self.model
+        )
 
         duration = time.time() - start_time
         self.memory.save_session(task, final_answer, duration)
         self.conversation_history.append({"user": task, "assistant": final_answer})
-
         return final_answer
 
-    # ------------------------------------------------------------------
-    # Cleanup — does NOT permanently destroy the shared LLM client
-    # ------------------------------------------------------------------
-
     async def cleanup(self):
-        """
-        Release resources for this agent.
-
-        We deliberately do NOT call self.llm.close() here because llm_client
-        is a global singleton shared across all agents in the process.
-        Closing it in one agent would break subsequent agents/tests.
-        """
-        pass  # Nothing per-agent to clean up right now
+        pass  # llm_client is a shared singleton — do not close it here
 
 
 # Aliases
