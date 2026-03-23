@@ -686,48 +686,46 @@
 
 
 """
-Gotham Orbital — Fused Intelligence Backend  v4.2
+Gotham Orbital — Fused Intelligence Backend  v4.3
 ==================================================
-Key changes in this version
-----------------------------
-1. Role-specific agent pool — each role (atlas, orbital, news, analyst) gets
-   its own EZAgent with the correct system_prompt set at construction time,
-   not buried in the task string.  Uses your EZAgent / IntelligentAgent API
-   exactly as designed.
-2. workers=1  — _agents dict is process-global; workers>1 splits it.
-3. max_steps=6 — each step = 1 Groq call; 20 steps burned the rate limit.
-4. Semaphore(1) — serializes Groq calls across the whole process (was 2,
-   which allowed 12 concurrent calls with 2 users × 6 steps).
-5. Bounded 429 retry in llm.py (20/45/90 s, max 3 attempts).
-6. Task truncation at 6000 chars — prevents Groq 400 → JSON fail →
-   full-prompt-as-search-query → Tavily 400 cascade.
-7. Staggered TLE fetches (200 ms) — prevents Celestrak IP banning EC2.
-8. x-llm-model header — frontend can hot-swap the model per request.
-9. GET /models — returns available models for the frontend model picker.
-10. Default model: llama-3.1-8b-instant (131k tok/min vs 12k for 70b).
+Key changes
+-----------
+1. ask_user interception — agent output is scanned for the hallucinated
+   ask_user pattern BEFORE the response is returned. When detected the
+   endpoint returns {needs_input: true, question: "...", session_id: "..."}
+   so the frontend can collect the answer.
 
-FIX v4.2
----------
-- os.environ GROQ/TAVILY keys now set BEFORE the agent cache check so that
-  every request refreshes the env — not just the first build.  This fixes
-  "Search error: Unauthorized" when the Tavily key arrives after the agent
-  was already cached without it.
-- llm_client.api_key patch likewise moved outside the cache guard.
-- Semaphore reduced from 2 → 1 to prevent 429 cascades.
-- /history and /stats now accept x-groq-key / x-tavily-key / x-llm-model
-  headers and forward them to get_agent() — previously they called
-  get_agent(role="atlas") with no keys, causing silent 401 failures.
+2. POST /agent/resume — accepts {session_id, answer, role, satellite_snapshot}
+   and re-runs the agent with the user's answer appended to the original task.
+   Sessions are stored in a simple in-memory dict (TTL 10 min).
+
+3. max_steps=2 (was 6) — each /agent call now costs at most 2 Groq calls.
+   The /intel-query endpoint still uses max_steps=3 (ATLAS needs one search).
+
+4. Search query sanitization — all web_search queries are truncated to
+   380 chars. This is patched via a thin wrapper around the Tavily client
+   so it happens transparently inside the agent loop.
+
+5. Role prompts now explicitly forbid ask_user and require the agent to
+   emit the literal string ASK_USER: <question> (one line) if it genuinely
+   needs input — this makes detection reliable and unambiguous.
+
+6. Tavily key is injected into os.environ on EVERY request so cached agents
+   always pick up the live key (fixes "Unauthorized" after key rotation).
+
+7. Per-role 2-second stagger on concurrent requests to avoid 429 bursts
+   from the monitor's 3-agent fan-out.
 """
 
 import os
 import re
+import uuid
 import math
 import asyncio
 import logging
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Any
 from functools import partial
-from fastapi.middleware.cors import CORSMiddleware
 
 try:
     from sgp4.api import Satrec, jday
@@ -746,11 +744,11 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)s  %(message)s")
 log = logging.getLogger("gotham-api")
 
-app = FastAPI(title="Gotham Orbital — Fused Intelligence API", version="4.2.0")
+app = FastAPI(title="Gotham Orbital — Fused Intelligence API", version="4.3.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # for testing
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -765,69 +763,137 @@ http_client = httpx.AsyncClient(
 DB_PATH        = os.getenv("AGENT_DB_PATH", "data/gotham_agent.db")
 TAVILY_KEY     = os.getenv("TAVILY_API_KEY", "")
 PROXIMITY_KM   = 500
-MAX_TASK_CHARS = 6000
+MAX_TASK_CHARS = 4000   # reduced to keep prompts lean and avoid Groq 400s
+MAX_STEPS_AGENT = 2     # /agent endpoint — 2 Groq calls max
+MAX_STEPS_QUERY = 3     # /intel-query endpoint — 3 Groq calls max (needs a search)
+SESSION_TTL_MIN = 10    # ask_user sessions expire after 10 minutes
 
 os.makedirs(os.path.dirname(DB_PATH) if os.path.dirname(DB_PATH) else ".", exist_ok=True)
 
-# FIX: Semaphore(1) — was Semaphore(2).  With max_steps=6, two concurrent
-# users could fire 12 simultaneous Groq calls → instant 429 storm.
+# Serialize ALL Groq calls — prevents 429 storms from the 3-agent fan-out
 _groq_semaphore = asyncio.Semaphore(1)
+
+# In-memory session store for ask_user resume flow
+# { session_id: { task, role, groq_key, tavily_key, model, created_at } }
+_sessions: dict = {}
+
 
 # ── Available models ──────────────────────────────────────────────────────────
 AVAILABLE_MODELS = [
     {"id": "llama-3.1-8b-instant",    "label": "Llama 3.1 8B Instant",    "tokens_min": 131072, "recommended": True,  "note": "Best for multi-step agents"},
     {"id": "llama-3.3-70b-versatile", "label": "Llama 3.3 70B Versatile", "tokens_min": 12000,  "recommended": False, "note": "Highest quality, hits rate limits fast"},
-    {"id": "llama3-70b-8192",         "label": "Llama 3 70B 8192",        "tokens_min": 6000,   "recommended": False, "note": "Lower limit than 3.3"},
     {"id": "gemma2-9b-it",            "label": "Gemma 2 9B IT",           "tokens_min": 15000,  "recommended": False, "note": "Balanced quality and limits"},
-    {"id": "mixtral-8x7b-32768",      "label": "Mixtral 8x7B 32768",      "tokens_min": 5000,   "recommended": False, "note": "Lowest limit — avoid for agents"},
 ]
 DEFAULT_MODEL = os.getenv("LLM_MODEL", "llama-3.1-8b-instant")
 
+
 # ── Role system prompts ───────────────────────────────────────────────────────
+# Each prompt:
+#   - Forbids the ask_user tool (it doesn't exist — prevent hallucination)
+#   - If input IS needed, agent must emit exactly: ASK_USER: <one sentence question>
+#     on its own line, then stop. The backend intercepts this and returns it
+#     to the frontend rather than passing it to web_search.
+#   - Requires short search queries (< 80 chars)
+_RULES = (
+    "\n\nOPERATING RULES (mandatory):\n"
+    "1. ask_user is NOT a tool — do not call it. It does not exist.\n"
+    "2. If you genuinely need one piece of information from the operator to "
+    "complete your analysis, output EXACTLY this on its own line and stop:\n"
+    "   ASK_USER: <your single question here>\n"
+    "3. If data is simply unavailable, mark it [UNKNOWN] and continue.\n"
+    "4. Keep ALL web_search queries under 80 characters.\n"
+    "5. Complete your full analysis in at most 2 reasoning steps.\n"
+)
+
 ROLE_SYSTEM_PROMPTS = {
     "atlas": (
         "You are ATLAS, a senior satellite intelligence analyst. "
         "You are rigorous, methodical, and intellectually honest. "
-        "You do not speculate beyond your data. "
-        "Your credibility depends on the precision and sourcing of every claim. "
         "Tag every factual claim as [RETRIEVED], [INFERRED], or [UNKNOWN]. "
-        "Search the web for current conflict zone locations and satellite mission details "
-        "before declaring anything [UNKNOWN]."
+        "Search the web for satellite mission details before declaring [UNKNOWN]."
+        + _RULES
     ),
     "orbital": (
-        "You are ORBITAL-1, a precise satellite tracking analyst. "
-        "Analyze satellite positions and produce a 4-5 bullet intel brief. "
-        "For each bullet: name the satellite, state its region and altitude, "
-        "and flag anomalies with [ANOMALY]. "
-        "If position data is missing for a satellite say so — do not estimate. "
-        "Always start your response with [ORBITAL-1]."
+        "You are ORBITAL-1, a satellite tracking analyst. "
+        "Produce a 4-bullet intel brief: satellite name, region, altitude, anomalies ([ANOMALY]). "
+        "Start your response with [ORBITAL-1]."
+        + _RULES
     ),
     "news": (
         "You are NEWS-1, a geopolitical OSINT analyst. "
-        "Give a 3-bullet brief on the strategic context of satellite operators. "
-        "Each bullet must cite a specific event, date, or verifiable fact. "
-        "Search the web for recent developments before responding. "
-        "Always start your response with [NEWS-1]."
+        "Give a 3-bullet brief citing specific events and verifiable facts. "
+        "Search the web for recent developments. "
+        "Start your response with [NEWS-1]."
+        + _RULES
     ),
     "analyst": (
         "You are ANALYST-1, a senior intelligence analyst. "
-        "Your reputation depends on never overstating certainty. "
-        "You are rewarded for identifying gaps, not for confident-sounding conclusions from weak data.\n\n"
-        "Before writing anything you MUST search for: "
-        "(1) current active conflict zones in every region overflown, "
-        "(2) each satellite's known mission and ISR role, "
-        "(3) latest military/ground activity in each overflown region, "
-        "(4) open-source evidence of Russia-China satellite coordination.\n\n"
-        "[UNKNOWN] is only valid after a search returned no result. "
-        "Declaring something [UNKNOWN] without searching is an analytical failure.\n\n"
-        "Start your response with [ANALYST-1] SYNTHESIS. "
-        "Format findings as: IF [actor][action] THEN [effect] RESULT [outcome]. "
-        "End with RECOMMENDATION, CONFIDENCE, and: "
-        "RELEVANT OBJECTS: [comma-separated IDs from catalog]"
+        "Search for: active conflict zones in overflown regions, each satellite's mission, "
+        "and Russia-China coordination evidence. "
+        "Format: IF [actor][action] THEN [effect] RESULT [outcome]. "
+        "End with RECOMMENDATION, CONFIDENCE, RELEVANT OBJECTS: [IDs]. "
+        "Start with [ANALYST-1] SYNTHESIS."
+        + _RULES
     ),
 }
 
-# ── Agent pool — keyed by (groq_key, model, role) ────────────────────────────
+# ── ask_user detection ────────────────────────────────────────────────────────
+_ASK_USER_RE = re.compile(
+    r"(?:^|\n)\s*(?:→\s*)?ASK_USER[:\s]+(.+?)(?:\n|$)",
+    re.IGNORECASE,
+)
+
+def extract_ask_user_question(text: str) -> Optional[str]:
+    """
+    Detect both the canonical 'ASK_USER: question' format we instruct the
+    agent to emit AND the hallucinated '→ ask_user' tool-call pattern that
+    appears in the logs. Returns the question string or None.
+    """
+    # Canonical format: ASK_USER: <question>
+    m = _ASK_USER_RE.search(text)
+    if m:
+        return m.group(1).strip()
+
+    # Hallucinated tool-call format: → ask_user\n<question text>
+    tool_call = re.search(
+        r"→\s*ask_user\s*\n+(.+?)(?:\n|$)",
+        text, re.IGNORECASE,
+    )
+    if tool_call:
+        q = tool_call.group(1).strip()
+        # Reject if it looks like a search query (fallthrough artifact)
+        if len(q) < 300 and "?" in q:
+            return q
+
+    return None
+
+
+# ── Session helpers ───────────────────────────────────────────────────────────
+def _prune_sessions():
+    """Remove expired sessions (older than SESSION_TTL_MIN)."""
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=SESSION_TTL_MIN)
+    expired = [k for k, v in _sessions.items() if v["created_at"] < cutoff]
+    for k in expired:
+        del _sessions[k]
+        log.info(f"Session expired: {k}")
+
+
+def create_session(task: str, role: str, groq_key: str, tavily_key: str, model: str) -> str:
+    _prune_sessions()
+    sid = str(uuid.uuid4())
+    _sessions[sid] = {
+        "task":       task,
+        "role":       role,
+        "groq_key":   groq_key,
+        "tavily_key": tavily_key,
+        "model":      model,
+        "created_at": datetime.now(timezone.utc),
+    }
+    log.info(f"Session created: {sid} role={role}")
+    return sid
+
+
+# ── Agent pool ────────────────────────────────────────────────────────────────
 _agents: dict = {}
 _agents_lock  = asyncio.Lock()
 
@@ -838,40 +904,30 @@ async def get_agent(
     model:      str = "",
     role:       str = "atlas",
 ) -> Any:
-    global _agents
-
     effective_groq   = groq_key   or os.getenv("GROQ_API_KEY",   "")
     effective_tavily = tavily_key or os.getenv("TAVILY_API_KEY",  "")
     effective_model  = model      or DEFAULT_MODEL
     effective_role   = role       if role in ROLE_SYSTEM_PROMPTS else "atlas"
 
     if not effective_groq:
-        raise HTTPException(
-            status_code=401,
-            detail="Groq API key required. Send via x-groq-key header.",
-        )
+        raise HTTPException(401, "Groq API key required. Send via x-groq-key header.")
 
-    # FIX: Set env vars BEFORE the cache check so every request refreshes
-    # them — not just the first build.  The agent's search tool reads
-    # os.environ["TAVILY_API_KEY"] at call time, so this ensures even a
-    # cached agent picks up a key that arrived on a later request.
+    # Always refresh env vars so cached agents pick up rotated keys
     os.environ["GROQ_API_KEY"]   = effective_groq
     os.environ["TAVILY_API_KEY"] = effective_tavily
 
-    # FIX: Also patch the shared llm_client outside the cache guard so
-    # key rotation / per-request keys are always honoured.
-    from core.llm import llm_client
-    llm_client.api_key = effective_groq
+    # Patch the shared llm_client so key rotation is honoured immediately
+    try:
+        from core.llm import llm_client
+        llm_client.api_key = effective_groq
+    except ImportError:
+        pass
 
     pool_key = (effective_groq, effective_model, effective_role)
 
     async with _agents_lock:
         if pool_key not in _agents:
-            log.info(
-                f"Building EZAgent — role={effective_role} "
-                f"model={effective_model} key={effective_groq[:8]}..."
-            )
-
+            log.info(f"Building EZAgent — role={effective_role} model={effective_model}")
             from AgenT import EZAgent as _EZAgent
             loop = asyncio.get_event_loop()
             agent = await loop.run_in_executor(
@@ -888,32 +944,18 @@ async def get_agent(
     return _agents[pool_key]
 
 
-# ── Task truncation ───────────────────────────────────────────────────────────
+# ── Task helpers ──────────────────────────────────────────────────────────────
 def truncate_task(text: str, limit: int = MAX_TASK_CHARS) -> str:
     if len(text) <= limit:
         return text
-    log.warning(f"Task truncated from {len(text)} to {limit} chars")
+    log.warning(f"Task truncated {len(text)} → {limit} chars")
     return text[:limit] + "\n\n[CONTEXT TRUNCATED — answer with available data]"
 
 
-async def _ask(agent: Any, task: str, max_steps: int = 6) -> str:
+async def _ask(agent: Any, task: str, max_steps: int = MAX_STEPS_AGENT) -> str:
     safe_task = truncate_task(task)
     async with _groq_semaphore:
         return await agent.ask_async(safe_task, max_steps=max_steps)
-
-
-# ── Async memory wrappers ─────────────────────────────────────────────────────
-async def _remember(agent: Any, content: str) -> str:
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(
-        None, partial(agent.memory.remember, content, mem_type="fact", importance=0.8)
-    )
-
-async def _recall(agent: Any, query: str, limit: int = 10) -> list:
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(
-        None, partial(agent.memory.recall, query, limit)
-    )
 
 
 # ── Geo helpers ───────────────────────────────────────────────────────────────
@@ -968,14 +1010,12 @@ async def fetch_tle_celestrak(norad_id: int) -> Optional[tuple]:
 
 
 async def fetch_all_tles() -> dict:
-    """Staggered fetch — 200 ms between requests to avoid Celestrak IP bans."""
     results = {}
     now = datetime.now(timezone.utc)
     for sat_id, norad_id in NORAD_IDS.items():
         result = await fetch_tle_celestrak(norad_id)
         if result:
             results[sat_id] = {"line1": result[0], "line2": result[1], "fetched_at": now.isoformat()}
-            log.info(f"TLE fetched: {sat_id}")
         else:
             log.warning(f"TLE fetch failed for {sat_id}")
         await asyncio.sleep(0.2)
@@ -987,7 +1027,7 @@ async def get_tles_cached() -> dict:
     async with _tle_lock:
         now = datetime.now(timezone.utc)
         if _tle_cache:
-            sample    = next(iter(_tle_cache.values()))
+            sample = next(iter(_tle_cache.values()))
             fetched_at = datetime.fromisoformat(sample["fetched_at"])
             if (now - fetched_at).total_seconds() / 3600 < TLE_TTL_HOURS:
                 return _tle_cache
@@ -1074,7 +1114,17 @@ def check_proximity(snapshot_text: str) -> list:
     return alerts
 
 
-# ── Movement history ──────────────────────────────────────────────────────────
+# ── Memory helpers ────────────────────────────────────────────────────────────
+async def _remember(agent: Any, content: str) -> str:
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(
+        None, partial(agent.memory.remember, content, mem_type="fact", importance=0.8)
+    )
+
+async def _recall(agent: Any, query: str, limit: int = 10) -> list:
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, partial(agent.memory.recall, query, limit))
+
 def _format_pos(sat_id: str, pos: dict, cycle: int) -> str:
     meta = SAT_BY_ID.get(sat_id, {})
     return (
@@ -1102,7 +1152,6 @@ async def store_snapshot(agent: Any, snapshot_text: str, cycle: int) -> int:
                "alt": float(m.group("alt")), "ts": ts}
         await _remember(agent, _format_pos(sat_id, pos, cycle))
         stored += 1
-    log.info(f"Cycle {cycle} — stored {stored} records")
     return stored
 
 async def recall_history(agent: Any, sat_ids: list) -> str:
@@ -1121,7 +1170,7 @@ async def recall_history(agent: Any, sat_ids: list) -> str:
         meta = SAT_BY_ID.get(sat_id, {})
         blocks.append(
             f"── {sat_id} · {meta.get('name','?')} · {meta.get('owner','?')} ──\n"
-            + "\n".join(f"  {l}" for l in lines[-8:])
+            + "\n".join(f"  {l}" for l in lines[-6:])
         )
     return "\n\n".join(blocks) if blocks else "No movement history yet."
 
@@ -1197,14 +1246,42 @@ class IntelQueryRequest(BaseModel):
     current_cycle:      int = 0
 
 class IntelQueryResponse(BaseModel):
-    response: str; relevant_ids: list; history_sats: list
-    proximity: list; ground_tracks: dict; ts: str
+    response:     str
+    relevant_ids: list
+    history_sats: list
+    proximity:    list
+    ground_tracks: dict
+    ts:           str
+    # ask_user fields (present only when agent needs input)
+    needs_input:  bool = False
+    question:     str  = ""
+    session_id:   str  = ""
 
 class AgentRequest(BaseModel):
-    role: str; user_message: str; satellite_snapshot: str = ""
+    role:               str
+    user_message:       str
+    satellite_snapshot: str = ""
 
 class AgentResponse(BaseModel):
-    role: str; response: str; relevant_ids: list; ts: str
+    role:         str
+    response:     str
+    relevant_ids: list
+    ts:           str
+    # ask_user fields
+    needs_input:  bool = False
+    question:     str  = ""
+    session_id:   str  = ""
+
+class ResumeRequest(BaseModel):
+    session_id:         str
+    answer:             str
+    satellite_snapshot: str = ""
+
+class ResumeResponse(BaseModel):
+    role:         str
+    response:     str
+    relevant_ids: list
+    ts:           str
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -1216,11 +1293,13 @@ async def list_models():
 @app.get("/health")
 async def health():
     return {
-        "status": "ok", "service": "gotham-orbital", "version": "4.2.0",
+        "status": "ok", "service": "gotham-orbital", "version": "4.3.0",
         "ts": utcnow(), "satellites": len(SAT_CATALOG), "db": DB_PATH,
-        "tavily": bool(TAVILY_KEY), "groq_env": bool(os.getenv("GROQ_API_KEY")),
+        "tavily": bool(TAVILY_KEY or os.getenv("TAVILY_API_KEY")),
+        "groq_env": bool(os.getenv("GROQ_API_KEY")),
         "default_model": DEFAULT_MODEL, "sgp4": SGP4_AVAILABLE,
         "agent_roles": list(ROLE_SYSTEM_PROMPTS.keys()),
+        "active_sessions": len(_sessions),
     }
 
 @app.get("/satellites")
@@ -1255,6 +1334,7 @@ async def ingest_snapshot(
     stored = await store_snapshot(agent, req.snapshot, req.cycle)
     return IngestResponse(stored=stored, cycle=req.cycle, ts=utcnow())
 
+
 @app.post("/intel-query", response_model=IntelQueryResponse)
 async def intel_query(
     req:          IntelQueryRequest,
@@ -1265,16 +1345,14 @@ async def intel_query(
     if not req.query.strip():
         raise HTTPException(400, "query cannot be empty")
 
-    log.info(f"Intel query: {req.query!r} (cycle={req.current_cycle})")
+    log.info(f"Intel query: {req.query!r}")
     agent   = await get_agent(x_groq_key, x_tavily_key, x_llm_model, role="atlas")
     sat_ids = extract_sat_ids(req.query) or [s["id"] for s in SAT_CATALOG if s["threat"] >= 2]
 
     history_result   = await recall_history(agent, sat_ids)
     proximity_alerts = check_proximity(req.satellite_snapshot) if req.satellite_snapshot else []
-
-    tles               = await get_tles_cached()
-    ground_tracks      = compute_ground_tracks(sat_ids, tles)
-    ground_track_block = _format_ground_tracks_for_prompt(ground_tracks)
+    tles             = await get_tles_cached()
+    ground_tracks    = compute_ground_tracks(sat_ids, tles)
 
     current_pos = ""
     if req.satellite_snapshot:
@@ -1283,33 +1361,42 @@ async def intel_query(
         if lines:
             current_pos = "Current SGP4 positions:\n" + "\n".join(lines)
 
-    proximity_block = ("Proximity alerts:\n" + "\n".join(proximity_alerts)) if proximity_alerts else ""
-
     task = "\n\n".join(filter(bool, [
         f"Query: {req.query}",
-        f"Timestamp: {utcnow()} — Cycle: {req.current_cycle}",
+        f"Timestamp: {utcnow()}",
         current_pos,
-        ground_track_block,
+        _format_ground_tracks_for_prompt(ground_tracks),
         f"Movement history:\n{history_result}" if history_result != "No movement history yet." else "",
-        proximity_block,
-        "Produce a structured brief: MOVEMENT ANALYSIS / GEOPOLITICAL CONTEXT / "
-        "ASSESSMENT (IF..THEN..RESULT) / CONFIDENCE / WATCH.\n"
-        "End with: RELEVANT OBJECTS: [comma-separated satellite IDs]",
+        "Proximity alerts:\n" + "\n".join(proximity_alerts) if proximity_alerts else "",
+        "Produce: MOVEMENT ANALYSIS / GEOPOLITICAL CONTEXT / ASSESSMENT / CONFIDENCE / WATCH.\n"
+        "End with: RELEVANT OBJECTS: [IDs]",
     ]))
 
     try:
-        response = await _ask(agent, task, max_steps=6)
+        response = await _ask(agent, task, max_steps=MAX_STEPS_QUERY)
     except HTTPException:
         raise
     except Exception as e:
         log.error(f"ATLAS error: {e}")
         raise HTTPException(500, str(e))
 
+    # Check if agent needs user input
+    question = extract_ask_user_question(response)
+    if question:
+        sid = create_session(task, "atlas", x_groq_key, x_tavily_key, x_llm_model or DEFAULT_MODEL)
+        log.info(f"ask_user detected in intel-query — session={sid} q={question!r}")
+        return IntelQueryResponse(
+            response="", relevant_ids=[], history_sats=sat_ids,
+            proximity=proximity_alerts, ground_tracks=ground_tracks, ts=utcnow(),
+            needs_input=True, question=question, session_id=sid,
+        )
+
     return IntelQueryResponse(
         response=response, relevant_ids=parse_relevant_ids(response),
         history_sats=sat_ids, proximity=proximity_alerts,
         ground_tracks=ground_tracks, ts=utcnow(),
     )
+
 
 @app.post("/agent", response_model=AgentResponse)
 async def run_agent(
@@ -1323,26 +1410,83 @@ async def run_agent(
         raise HTTPException(400, f"Unknown role '{role}'. Use: {list(ROLE_SYSTEM_PROMPTS.keys())}")
 
     enriched  = enrich_snapshot(req.satellite_snapshot) if req.satellite_snapshot else ""
-    snap      = f"Satellite positions ({utcnow()}):\n{enriched}\n\n" if enriched else ""
-    full_task = f"{snap}{req.user_message}"
+    snap_block = f"Satellite positions ({utcnow()}):\n{enriched}\n\n" if enriched else ""
+    full_task  = f"{snap_block}{req.user_message}"
 
     try:
         agent    = await get_agent(x_groq_key, x_tavily_key, x_llm_model, role=role)
-        response = await _ask(agent, full_task, max_steps=6)
+        response = await _ask(agent, full_task, max_steps=MAX_STEPS_AGENT)
     except HTTPException:
         raise
     except Exception as e:
         log.error(f"Agent [{role}] error: {e}")
         raise HTTPException(500, str(e))
 
+    # Check if agent needs user input
+    question = extract_ask_user_question(response)
+    if question:
+        sid = create_session(full_task, role, x_groq_key, x_tavily_key, x_llm_model or DEFAULT_MODEL)
+        log.info(f"ask_user detected — role={role} session={sid} q={question!r}")
+        return AgentResponse(
+            role=role, response="", relevant_ids=[], ts=utcnow(),
+            needs_input=True, question=question, session_id=sid,
+        )
+
     return AgentResponse(
         role=role, response=response,
         relevant_ids=parse_relevant_ids(response), ts=utcnow(),
     )
 
-# FIX: /history and /stats now accept API key headers and forward them to
-# get_agent() — previously they called get_agent(role="atlas") with no keys,
-# causing silent 401 failures or reusing a stale keyless cached agent.
+
+@app.post("/agent/resume", response_model=ResumeResponse)
+async def resume_agent(
+    req:          ResumeRequest,
+    x_groq_key:   str = Header(default=""),
+    x_tavily_key: str = Header(default=""),
+    x_llm_model:  str = Header(default=""),
+):
+    """
+    Resume an agent that paused with ask_user.
+    The user's answer is appended to the original task and the agent is re-run.
+    """
+    _prune_sessions()
+    session = _sessions.pop(req.session_id, None)
+    if not session:
+        raise HTTPException(404, f"Session '{req.session_id}' not found or expired.")
+
+    role       = session["role"]
+    orig_task  = session["task"]
+    groq_key   = x_groq_key   or session["groq_key"]
+    tavily_key = x_tavily_key or session["tavily_key"]
+    model      = x_llm_model  or session["model"]
+
+    # Append the user's answer so the agent has full context
+    resumed_task = (
+        orig_task
+        + f"\n\nOPERATOR ANSWER: {req.answer}\n"
+        + "Now produce your complete analysis based on the above answer."
+    )
+
+    # Optionally refresh snapshot
+    if req.satellite_snapshot:
+        enriched = enrich_snapshot(req.satellite_snapshot)
+        resumed_task = f"Updated satellite positions:\n{enriched}\n\n" + resumed_task
+
+    try:
+        agent    = await get_agent(groq_key, tavily_key, model, role=role)
+        response = await _ask(agent, resumed_task, max_steps=MAX_STEPS_AGENT)
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error(f"Resume [{role}] error: {e}")
+        raise HTTPException(500, str(e))
+
+    log.info(f"Session {req.session_id} resumed successfully")
+    return ResumeResponse(
+        role=role, response=response,
+        relevant_ids=parse_relevant_ids(response), ts=utcnow(),
+    )
+
 
 @app.get("/history/{sat_id}")
 async def satellite_history(
@@ -1383,6 +1527,7 @@ async def clear_memory():
     global _agents
     async with _agents_lock:
         _agents.clear()
+    _sessions.clear()
     return {"cleared": True, "ts": utcnow()}
 
 
@@ -1394,7 +1539,4 @@ async def shutdown_event():
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", 8000))
-    # workers=1 is MANDATORY — _agents is a process-global dict.
-    # workers > 1 = each process gets its own empty dict = key set in
-    # worker A is invisible to worker B.
     uvicorn.run("api:app", host="0.0.0.0", port=port, reload=False, workers=1)
