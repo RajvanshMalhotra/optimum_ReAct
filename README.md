@@ -4,9 +4,24 @@ Tired of langchain and endless courses on youtube and udemy, want full control?
 all prayers have been answered,this framework exactly does that, no unneccesary confusion hassle to setup.
 faster and more logical answers and  opensource guess it's christmas 🎄 like every time of the year!
 
-(under maintenance)
-have a quick look at https://optimum-react-streamlit.onrender.com/ 
-(P.S lil slow, render free teir)
+Gotham orbital 
+As mentioned on my linkdin here is  the complete guide to run up to the gotham orbital on your pc:
+1) go to https://github.com/RajvanshMalhotra/Gotham-frontend clone it
+2) clone this repo also
+3) make images using docker and run the conatiners
+4) frontend is hosted on port 3000 (aws ec2)
+5) and this on 8080 (aws ec2)
+
+docker commands:
+backend (api.py):
+docker build --build-arg VITE_BACKEND_URL=http://ip:port--build-arg VITE_CESIUM_TOKEN="your cesium token" --build-arg VITE_METALS_API_KEY="your gold api key"  -t gotham-fe . && docker run -d -p 3000:3000 gotham-fe
+for frontend simply make image and run the container.
+
+if you are going to host this on ec2 reccomended stack: t3.medium with 30 gigs storage ram -> freehand there :)
+
+
+Its open source, welcoming contributions.
+
 ## 1. Getting Started
 
 ### Installation
