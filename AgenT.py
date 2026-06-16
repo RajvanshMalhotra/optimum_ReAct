@@ -325,21 +325,28 @@
 
 
 """
-EZ Agent — simple interface for your ReAct agent.
+EZ Agent — simple interface for all agent architectures.
 
 Usage:
     from AgenT import EZAgent
 
-    # Default model (from config.py / LLM_MODEL env var)
+    # ReAct (default — backwards compatible)
     agent = EZAgent()
 
-    # Explicit model + system prompt
-    agent = EZAgent(
-        model="llama-3.3-70b-versatile",
-        system_prompt="You are ATLAS, a satellite intelligence analyst.",
-    )
+    # Plan-and-Execute
+    agent = EZAgent(architecture="plan_execute")
 
-    result = agent.ask("What is 15 * 23?")
+    # Tree of Thoughts
+    agent = EZAgent(architecture="tot", n_thoughts=3, beam_width=2)
+
+    # All architectures share the same API
+    result = agent.ask("Research the latest breakthroughs in fusion energy")
+    print(result)
+
+Architectures:
+    "react"         — original ReAct loop (default, fast, good for most tasks)
+    "plan_execute"  — separate planner + executor (better for structured tasks)
+    "tot"           — Tree of Thoughts beam search (best quality, higher cost)
 """
 
 import asyncio
@@ -347,48 +354,77 @@ from memory.hybrid import HybridMemory
 from core.agent import FastAgent
 
 
+# Lazy imports to avoid loading unused agent classes at startup
+def _make_agent(arch: str, memory, model: str, system_prompt, tools, **kwargs):
+    if arch == "plan_execute":
+        from core.plan_execute_agent import PlanAndExecuteAgent
+        return PlanAndExecuteAgent(memory, model=model, system_prompt=system_prompt, tools=tools)
+    if arch == "tot":
+        from core.tot_agent import TreeOfThoughtsAgent
+        return TreeOfThoughtsAgent(
+            memory,
+            model=model,
+            system_prompt=system_prompt,
+            tools=tools,
+            n_thoughts=kwargs.get("n_thoughts", 3),
+            beam_width=kwargs.get("beam_width", 2),
+            max_depth=kwargs.get("max_depth", 4),
+        )
+    # default: react
+    return FastAgent(memory, system_prompt=system_prompt, tools=tools, model=model)
+
+
 class EZAgent:
-    """Easy-to-use agent interface wrapping IntelligentAgent."""
+    """Easy-to-use agent interface — supports react, plan_execute, and tot architectures."""
 
     def __init__(
         self,
-        memory_path:   str       = "agent_memory.db",
-        model:         str       = "",
+        memory_path:   str        = "agent_memory.db",
+        model:         str        = "",
         system_prompt: str | None = None,
         tools:         list | None = None,
+        architecture:  str        = "react",
+        **kwargs,
     ):
         """
         Args:
             memory_path:   Path to SQLite database for persistent memory.
-            model:         Groq model ID.  Empty = use LLM_MODEL from config.
-                           Examples:
+            model:         Groq model ID. Empty = use LLM_MODEL from config.
                              "llama-3.1-8b-instant"    (131k tok/min — recommended)
                              "llama-3.3-70b-versatile" (12k tok/min — highest quality)
                              "gemma2-9b-it"            (15k tok/min — balanced)
             system_prompt: Persona / role instruction injected at every reasoning step.
-                           Leave empty for the default general-purpose agent.
-            tools:         List of tool dicts to expose to the agent.
-                           Defaults to [web_search].
+            tools:         List of tool dicts. Defaults to [web_search].
+            architecture:  Agent reasoning architecture.
+                             "react"        — original loop (default)
+                             "plan_execute" — planner + executor split
+                             "tot"          — Tree of Thoughts beam search
+            **kwargs:      Architecture-specific params:
+                             n_thoughts=3   (tot) branching factor per node
+                             beam_width=2   (tot) nodes kept per depth level
+                             max_depth=4    (tot) max tree depth
         """
-        self.memory = HybridMemory(memory_path)
-        self.agent  = FastAgent(
-            self.memory,
-            system_prompt=system_prompt,
-            tools=tools,
-            model=model,
-        )
-        self.model  = self.agent.model   # expose resolved model name
+        self.memory       = HybridMemory(memory_path)
+        self.architecture = architecture
+        self.agent        = _make_agent(architecture, self.memory, model, system_prompt, tools, **kwargs)
+        self.model        = getattr(self.agent, "model", model)
 
     # ------------------------------------------------------------------
     # Ask interface
     # ------------------------------------------------------------------
 
     def ask(self, task: str, max_steps: int = 10) -> str:
-        """Ask the agent to perform a task (synchronous)."""
+        """Ask the agent to perform a task (synchronous). Returns answer string."""
         return asyncio.run(self.ask_async(task, max_steps))
 
-    async def ask_async(self, task: str, max_steps: int = 10) -> str:
-        """Ask the agent to perform a task (async)."""
+    async def ask_async(self, task: str, max_steps: int = 10):
+        """
+        Ask the agent to perform a task (async).
+
+        Returns:
+            str for react architecture (backwards compatible)
+            AgentResult for plan_execute and tot (contains .answer and .metrics)
+        """
         return await self.agent.run(task, max_steps=max_steps)
 
     # ------------------------------------------------------------------
